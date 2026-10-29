@@ -17,6 +17,7 @@ import { usePolling } from '../hooks/usePolling.js'
 import { formatDateTime, formatMac, modeLabel } from '../format.js'
 import ImportPreviewModal from '../components/ImportPreviewModal.jsx'
 import BackNav from '../components/BackNav.jsx'
+import Dropdown from '../components/Dropdown.jsx'
 import {
   Badge,
   Button,
@@ -31,7 +32,6 @@ import {
   RefreshButton,
   TopProgress,
   UpdatedAt,
-  inputClass,
   tableHead,
   tableRow,
   cx
@@ -144,7 +144,7 @@ export default function ControllerDetailPage() {
   const upPct = summary?.managed ? Math.round((summary.up / summary.managed) * 100) : 0
 
   return (
-    <div className="mx-auto max-w-7xl px-7 py-7">
+    <div className={cx('mx-auto max-w-7xl px-7 py-7', refreshing && 'cursor-progress')} aria-busy={refreshing}>
       <BackNav current={controller?.name} enabled={!importOpen && !viewJobId} />
 
       {/* header */}
@@ -177,137 +177,140 @@ export default function ControllerDetailPage() {
         )}
         <div className="flex shrink-0 gap-2">
           <RefreshButton refreshing={refreshing} onClick={() => loadAps()} />
-          <Button variant="primary" icon={FileSpreadsheet} onClick={() => setImportOpen(true)}>
+          <Button variant="primary" icon={FileSpreadsheet} disabled={refreshing} onClick={() => setImportOpen(true)}>
             Import Excel
           </Button>
         </div>
       </div>
 
-      {latestJob && <JobBanner job={latestJob} onView={() => setViewJobId(latestJob.id)} />}
+      {/* Locked while refreshing: inert blocks clicks and keyboard focus until the new data is in. */}
+      <div inert={refreshing}>
+        {latestJob && <JobBanner job={latestJob} onView={() => setViewJobId(latestJob.id)} />}
 
-      {/* stats */}
-      <div className="mt-6 grid grid-cols-4 gap-4">
-        <StatBox label="Total APs" value={summary ? summary.managed : '—'} icon={RadioTower} iconTone="accent" />
-        <StatBox
-          label="Up"
-          value={summary ? summary.up : '—'}
-          tone="text-ok"
-          icon={Wifi}
-          iconTone="ok"
-          hint={summary ? `${upPct}% of APs` : undefined}
-        />
-        <StatBox
-          label="Down"
-          value={summary ? summary.down : '—'}
-          tone={summary?.down > 0 ? 'text-bad' : undefined}
-          icon={WifiOff}
-          iconTone={summary?.down > 0 ? 'bad' : 'muted'}
-        />
-        <StatBox
-          label="Upgrading"
-          value={summary ? summary.upgrading : '—'}
-          tone={summary?.upgrading > 0 ? 'text-warn' : undefined}
-          icon={ArrowUpCircle}
-          iconTone={summary?.upgrading > 0 ? 'warn' : 'muted'}
-        />
-      </div>
-
-      {/* table */}
-      <Card className="relative mt-6 overflow-hidden">
-        <TopProgress active={refreshing && Boolean(data)} />
-        <div className="flex items-center justify-between gap-3 px-5 py-4">
-          <div>
-            <h2 className="font-semibold text-fg">Access Points</h2>
-            <p className="mt-0.5 flex items-center gap-1.5 text-xs text-subtle">
-              Live from the controller · refreshes every 5 seconds
-              <UpdatedAt at={updatedAt} />
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <select className={cx(inputClass, 'w-48')} value={group} onChange={(e) => setGroup(e.target.value)}>
-              <option value="">All groups ({aps.length})</option>
-              {groups.map(([g, n]) => (
-                <option key={g} value={g}>
-                  {g} ({n})
-                </option>
-              ))}
-            </select>
-            <SearchInput value={query} onChange={setQuery} placeholder="Search serial, MAC, name or IP" className="w-80" />
-          </div>
+        {/* stats */}
+        <div className="mt-6 grid grid-cols-4 gap-4">
+          <StatBox label="Total APs" value={summary ? summary.managed : '—'} icon={RadioTower} iconTone="accent" />
+          <StatBox
+            label="Up"
+            value={summary ? summary.up : '—'}
+            tone="text-ok"
+            icon={Wifi}
+            iconTone="ok"
+            hint={summary ? `${upPct}% of APs` : undefined}
+          />
+          <StatBox
+            label="Down"
+            value={summary ? summary.down : '—'}
+            tone={summary?.down > 0 ? 'text-bad' : undefined}
+            icon={WifiOff}
+            iconTone={summary?.down > 0 ? 'bad' : 'muted'}
+          />
+          <StatBox
+            label="Upgrading"
+            value={summary ? summary.upgrading : '—'}
+            tone={summary?.upgrading > 0 ? 'text-warn' : undefined}
+            icon={ArrowUpCircle}
+            iconTone={summary?.upgrading > 0 ? 'warn' : 'muted'}
+          />
         </div>
 
-        {apError && !data ? (
-          <div className="border-t border-line p-5">
-            <Alert
-              tone="red"
-              icon={AlertCircle}
-              title="Could not read the AP list from the controller"
-              action={
-                <Button size="sm" busy={refreshing} onClick={() => loadAps()}>
-                  Retry
-                </Button>
-              }
-            >
-              {apError}
-            </Alert>
-          </div>
-        ) : !data ? (
-          <div className="space-y-2 border-t border-line p-5">
-            {Array.from({ length: 8 }, (_, i) => (
-              <Skeleton key={i} className="h-10" />
-            ))}
-          </div>
-        ) : (
-          <>
-            {apError && (
-              <div className="border-t border-line bg-warn/8 px-5 py-2 text-xs text-warn">
-                Live refresh failed ({apError}). Showing the last data read.
-              </div>
-            )}
-            <table className="w-full text-sm">
-              <thead className={tableHead}>
-                <tr>
-                  <th className="px-5 py-2.5">Access Point</th>
-                  <th className="px-5 py-2.5">MAC Address</th>
-                  <th className="px-5 py-2.5">IP Address</th>
-                  <th className="px-5 py-2.5">Group</th>
-                  <th className="px-5 py-2.5">Model</th>
-                  <th className="px-5 py-2.5">Status</th>
-                </tr>
-              </thead>
-              <tbody className={cx('transition-opacity duration-200', refreshing && 'opacity-50')}>
-                {shown.map((a) => (
-                  <tr key={a.serial || a.mac} className={tableRow}>
-                    <td className="px-5 py-2.5">
-                      <div className="font-medium text-fg">{a.name}</div>
-                      <div className="mono mt-0.5 text-subtle">SN {a.serial}</div>
-                    </td>
-                    <td className="mono px-5 py-2.5 text-muted">{formatMac(a.mac)}</td>
-                    <td className="mono px-5 py-2.5 text-muted">{a.ip || '—'}</td>
-                    <td className="px-5 py-2.5">
-                      <span className="rounded-md bg-hover px-2 py-0.5 text-[12.5px] text-muted ring-1 ring-inset ring-line">{a.group}</span>
-                    </td>
-                    <td className="px-5 py-2.5 text-muted">{a.model}</td>
-                    <td className="px-5 py-2.5">
-                      <ApStatus ap={a} />
-                    </td>
-                  </tr>
-                ))}
-                {shown.length === 0 && (
-                  <tr className="border-t border-line">
-                    <td colSpan={6} className="px-5 py-12 text-center text-subtle">
-                      {aps.length ? 'No APs match this filter.' : 'This controller manages no APs.'}
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-            <div className="flex justify-end border-t border-line px-5 py-3">
-              <Pager page={page} pages={pages} total={filtered.length} onChange={setPage} />
+        {/* table */}
+        <Card className="relative mt-6 overflow-hidden">
+          <TopProgress active={refreshing && Boolean(data)} />
+          <div className="flex items-center justify-between gap-3 px-5 py-4">
+            <div>
+              <h2 className="font-semibold text-fg">Access Points</h2>
+              <p className="mt-0.5 flex items-center gap-1.5 text-xs text-subtle">
+                Live from the controller · refreshes every 5 seconds
+                <UpdatedAt at={updatedAt} />
+              </p>
             </div>
-          </>
-        )}
-      </Card>
+            <div className="flex items-center gap-2">
+              <Dropdown
+                className="w-56"
+                ariaLabel="Filter by AP group"
+                prefix="Group"
+                value={group}
+                onChange={setGroup}
+                options={[{ value: '', label: 'All groups', count: aps.length }, ...groups.map(([g, n]) => ({ value: g, label: g, count: n }))]}
+              />
+              <SearchInput value={query} onChange={setQuery} placeholder="Search serial, MAC, name or IP" className="w-80" />
+            </div>
+          </div>
+
+          {apError && !data ? (
+            <div className="border-t border-line p-5">
+              <Alert
+                tone="red"
+                icon={AlertCircle}
+                title="Could not read the AP list from the controller"
+                action={
+                  <Button size="sm" busy={refreshing} onClick={() => loadAps()}>
+                    Retry
+                  </Button>
+                }
+              >
+                {apError}
+              </Alert>
+            </div>
+          ) : !data ? (
+            <div className="space-y-2 border-t border-line p-5">
+              {Array.from({ length: 8 }, (_, i) => (
+                <Skeleton key={i} className="h-10" />
+              ))}
+            </div>
+          ) : (
+            <>
+              {apError && (
+                <div className="border-t border-line bg-warn/8 px-5 py-2 text-xs text-warn">
+                  Live refresh failed ({apError}). Showing the last data read.
+                </div>
+              )}
+              <table className="w-full text-sm">
+                <thead className={tableHead}>
+                  <tr>
+                    <th className="px-5 py-2.5">Access Point</th>
+                    <th className="px-5 py-2.5">MAC Address</th>
+                    <th className="px-5 py-2.5">IP Address</th>
+                    <th className="px-5 py-2.5">Group</th>
+                    <th className="px-5 py-2.5">Model</th>
+                    <th className="px-5 py-2.5">Status</th>
+                  </tr>
+                </thead>
+                <tbody className={cx('transition-opacity duration-200', refreshing && 'opacity-50 select-none')}>
+                  {shown.map((a) => (
+                    <tr key={a.serial || a.mac} className={tableRow}>
+                      <td className="px-5 py-2.5">
+                        <div className="font-medium text-fg">{a.name}</div>
+                        <div className="mono mt-0.5 text-subtle">SN {a.serial}</div>
+                      </td>
+                      <td className="mono px-5 py-2.5 text-muted">{formatMac(a.mac)}</td>
+                      <td className="mono px-5 py-2.5 text-muted">{a.ip || '—'}</td>
+                      <td className="px-5 py-2.5">
+                        <span className="rounded-md bg-hover px-2 py-0.5 text-[12.5px] text-muted ring-1 ring-inset ring-line">{a.group}</span>
+                      </td>
+                      <td className="px-5 py-2.5 text-muted">{a.model}</td>
+                      <td className="px-5 py-2.5">
+                        <ApStatus ap={a} />
+                      </td>
+                    </tr>
+                  ))}
+                  {shown.length === 0 && (
+                    <tr className="border-t border-line">
+                      <td colSpan={6} className="px-5 py-12 text-center text-subtle">
+                        {aps.length ? 'No APs match this filter.' : 'This controller manages no APs.'}
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+              <div className="flex justify-end border-t border-line px-5 py-3">
+                <Pager page={page} pages={pages} total={filtered.length} onChange={setPage} />
+              </div>
+            </>
+          )}
+        </Card>
+      </div>
 
       {(importOpen || viewJobId) && controller && (
         <ImportPreviewModal

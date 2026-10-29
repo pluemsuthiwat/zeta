@@ -99,7 +99,7 @@ export default function ControllersPage() {
   }
 
   return (
-    <div className="relative mx-auto max-w-7xl px-7 py-7">
+    <div className={cx('relative mx-auto max-w-7xl px-7 py-7', refreshing && 'cursor-progress')} aria-busy={refreshing}>
       <TopProgress active={refreshing} />
       <div className="flex items-end justify-between gap-4">
         <div>
@@ -111,80 +111,83 @@ export default function ControllersPage() {
         </div>
         <div className="flex gap-2">
           <RefreshButton refreshing={refreshing} onClick={refreshAll} />
-          <Button variant="primary" icon={Plus} onClick={() => setForm({ controller: null })}>
+          <Button variant="primary" icon={Plus} disabled={refreshing} onClick={() => setForm({ controller: null })}>
             Add Controller
           </Button>
         </div>
       </div>
 
-      <div className="mt-6 grid grid-cols-3 gap-4">
-        <StatBox label="Controllers" value={counts.all} icon={Server} iconTone="accent" />
-        <StatBox label="Online" value={counts.online} tone="text-ok" icon={CircleCheck} iconTone="ok" />
-        <StatBox
-          label="Offline"
-          value={counts.offline}
-          tone={counts.offline ? 'text-orange' : undefined}
-          icon={CircleAlert}
-          iconTone={counts.offline ? 'warn' : 'muted'}
-          hint="Includes Error and Unknown"
-        />
-      </div>
-
-      <div className="mt-6 flex items-center justify-between gap-3">
-        <SearchInput value={query} onChange={setQuery} placeholder="Search by name or IP" />
-        <Segmented
-          value={filter}
-          onChange={setFilter}
-          options={[
-            { value: 'all', label: 'All', count: counts.all },
-            { value: 'online', label: 'Online', count: counts.online },
-            { value: 'offline', label: 'Offline', count: counts.offline }
-          ]}
-        />
-      </div>
-
-      {loadError && (
-        <div className="mt-4">
-          <Alert tone="red">{loadError}</Alert>
-        </div>
-      )}
-
-      <div
-        className={cx(
-          'mt-4 grid grid-cols-1 gap-4 transition-opacity duration-200 lg:grid-cols-2 2xl:grid-cols-3',
-          refreshing && 'opacity-50'
-        )}
-      >
-        {controllers === null && [0, 1, 2].map((i) => <Skeleton key={i} className="h-72 rounded-2xl" />)}
-        {visible.map((c) => (
-          <ControllerCard
-            key={c.id}
-            controller={c}
-            onChange={replace}
-            onEdit={() => setForm({ controller: c })}
-            onDelete={() => setDeleting(c)}
+      {/* Locked while refreshing: inert blocks clicks and keyboard focus until the new data is in. */}
+      <div inert={refreshing}>
+        <div className="mt-6 grid grid-cols-3 gap-4">
+          <StatBox label="Controllers" value={counts.all} icon={Server} iconTone="accent" />
+          <StatBox label="Online" value={counts.online} tone="text-ok" icon={CircleCheck} iconTone="ok" />
+          <StatBox
+            label="Offline"
+            value={counts.offline}
+            tone={counts.offline ? 'text-orange' : undefined}
+            icon={CircleAlert}
+            iconTone={counts.offline ? 'warn' : 'muted'}
+            hint="Includes Error and Unknown"
           />
-        ))}
-      </div>
+        </div>
 
-      {controllers?.length === 0 && (
-        <Card className="relative mt-4 overflow-hidden px-6 py-16 text-center">
-          <div className="pointer-events-none absolute inset-x-0 -top-24 mx-auto h-48 w-96 rounded-full bg-accent/15 blur-3xl" />
-          <div className="relative mx-auto grid size-14 place-items-center rounded-2xl border border-line-strong bg-elev2">
-            <Router className="size-6 text-accent" />
+        <div className="mt-6 flex items-center justify-between gap-3">
+          <SearchInput value={query} onChange={setQuery} placeholder="Search by name or IP" />
+          <Segmented
+            value={filter}
+            onChange={setFilter}
+            options={[
+              { value: 'all', label: 'All', count: counts.all },
+              { value: 'online', label: 'Online', count: counts.online },
+              { value: 'offline', label: 'Offline', count: counts.offline }
+            ]}
+          />
+        </div>
+
+        {loadError && (
+          <div className="mt-4">
+            <Alert tone="red">{loadError}</Alert>
           </div>
-          <div className="relative mt-4 text-base font-semibold text-fg">No controllers yet</div>
-          <p className="relative mx-auto mt-1.5 max-w-sm text-sm text-subtle">
-            Add a controller with its IP, port and an admin account, then test the connection.
-          </p>
-          <Button className="relative mt-5" variant="primary" icon={Plus} onClick={() => setForm({ controller: null })}>
-            Add Controller
-          </Button>
-        </Card>
-      )}
-      {controllers?.length > 0 && visible.length === 0 && (
-        <p className="mt-10 text-center text-sm text-subtle">No controllers match this search.</p>
-      )}
+        )}
+
+        <div
+          className={cx(
+            'mt-4 grid grid-cols-1 gap-4 transition-opacity duration-200 lg:grid-cols-2 2xl:grid-cols-3',
+            refreshing && 'opacity-50 select-none'
+          )}
+        >
+          {controllers === null && [0, 1, 2].map((i) => <Skeleton key={i} className="h-72 rounded-2xl" />)}
+          {visible.map((c) => (
+            <ControllerCard
+              key={c.id}
+              controller={c}
+              onChange={replace}
+              onEdit={() => setForm({ controller: c })}
+              onDelete={() => setDeleting(c)}
+            />
+          ))}
+        </div>
+
+        {controllers?.length === 0 && (
+          <Card className="relative mt-4 overflow-hidden px-6 py-16 text-center">
+            <div className="pointer-events-none absolute inset-x-0 -top-24 mx-auto h-48 w-96 rounded-full bg-accent/15 blur-3xl" />
+            <div className="relative mx-auto grid size-14 place-items-center rounded-2xl border border-line-strong bg-elev2">
+              <Router className="size-6 text-accent" />
+            </div>
+            <div className="relative mt-4 text-base font-semibold text-fg">No controllers yet</div>
+            <p className="relative mx-auto mt-1.5 max-w-sm text-sm text-subtle">
+              Add a controller with its IP, port and an admin account, then test the connection.
+            </p>
+            <Button className="relative mt-5" variant="primary" icon={Plus} onClick={() => setForm({ controller: null })}>
+              Add Controller
+            </Button>
+          </Card>
+        )}
+        {controllers?.length > 0 && visible.length === 0 && (
+          <p className="mt-10 text-center text-sm text-subtle">No controllers match this search.</p>
+        )}
+      </div>
 
       {form && (
         <ControllerForm
