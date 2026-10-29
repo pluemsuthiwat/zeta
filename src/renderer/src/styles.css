@@ -1,0 +1,210 @@
+@import 'tailwindcss';
+
+/* Semantic color tokens. Dark is the default; [data-theme='light'] overrides. */
+:root,
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --bg: #0a0b0f;
+  --elev: #121419;
+  --elev2: #191c23;
+  --hover: rgb(255 255 255 / 0.05);
+  --line: rgb(255 255 255 / 0.07);
+  --line-strong: rgb(255 255 255 / 0.13);
+  --fg: #eceef3;
+  --muted: #a3a8b6;
+  --subtle: #6c7282;
+  --accent: #3b7bff;
+  --accent-2: #5aa2ff;
+  --ok: #3dd68c;
+  --warn: #f5b84a;
+  --bad: #ff5c72;
+  --info: #56b6ff;
+  --orange: #ff9150;
+  --glow-a: rgb(59 123 255 / 0.13);
+  --glow-b: rgb(56 189 248 / 0.07);
+  --card-shadow: 0 1px 0 0 rgb(255 255 255 / 0.04) inset, 0 12px 32px -16px rgb(0 0 0 / 0.6);
+}
+:root[data-theme='light'] {
+  color-scheme: light;
+  --bg: #f4f5f8;
+  --elev: #ffffff;
+  --elev2: #f0f1f5;
+  --hover: rgb(15 17 25 / 0.04);
+  --line: rgb(15 17 25 / 0.08);
+  --line-strong: rgb(15 17 25 / 0.15);
+  --fg: #14161c;
+  --muted: #565c6c;
+  --subtle: #8b91a1;
+  --accent: #2563eb;
+  --accent-2: #3b82f6;
+  --ok: #059669;
+  --warn: #b7791f;
+  --bad: #e11d48;
+  --info: #0284c7;
+  --orange: #ea580c;
+  --glow-a: rgb(37 99 235 / 0.08);
+  --glow-b: rgb(14 165 233 / 0.05);
+  --card-shadow: 0 1px 2px 0 rgb(15 17 25 / 0.04), 0 8px 24px -12px rgb(15 17 25 / 0.12);
+}
+
+@theme inline {
+  --font-sans: 'Segoe UI Variable Text', 'Segoe UI', -apple-system, BlinkMacSystemFont, system-ui, 'Helvetica Neue', Arial,
+    'Noto Sans Thai', 'Leelawadee UI', sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace;
+  --color-bg: var(--bg);
+  --color-elev: var(--elev);
+  --color-elev2: var(--elev2);
+  --color-hover: var(--hover);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-subtle: var(--subtle);
+  --color-accent: var(--accent);
+  --color-accent-2: var(--accent-2);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-bad: var(--bad);
+  --color-info: var(--info);
+  --color-orange: var(--orange);
+  --shadow-card: var(--card-shadow);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+body {
+  @apply text-fg antialiased;
+  font-size: 14px;
+  background:
+    radial-gradient(1100px 520px at 12% -12%, var(--glow-a), transparent 70%),
+    radial-gradient(900px 420px at 95% -18%, var(--glow-b), transparent 70%),
+    var(--bg);
+  background-attachment: fixed;
+}
+button {
+  @apply select-none;
+}
+
+/* Tailwind v4 leaves buttons on the default arrow: anything clickable gets a pointer. */
+@layer base {
+  button:not(:disabled),
+  [role='button'],
+  a[href],
+  select:not(:disabled),
+  summary,
+  label:has(> input[type='checkbox']),
+  label:has(> input[type='radio']),
+  input[type='checkbox']:not(:disabled),
+  input[type='radio']:not(:disabled),
+  input[type='file'] {
+    cursor: pointer;
+  }
+  button:disabled,
+  select:disabled,
+  input:disabled {
+    cursor: not-allowed;
+  }
+}
+.mono {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+.brand-gradient {
+  background-image: linear-gradient(135deg, var(--accent-2), var(--accent));
+}
+.brand-text {
+  background-image: linear-gradient(135deg, #ffb45e, var(--accent-2) 45%, var(--accent));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* Frameless window: the header is the drag handle; controls inside it opt out. */
+.drag {
+  -webkit-app-region: drag;
+}
+.no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* Scrollbars that follow the theme (Windows defaults are bright and wide). */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--subtle);
+}
+
+@keyframes ping-soft {
+  0% {
+    transform: scale(1);
+    opacity: 0.7;
+  }
+  80%,
+  100% {
+    transform: scale(2.4);
+    opacity: 0;
+  }
+}
+.animate-ping-soft {
+  animation: ping-soft 2s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(24px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes toast-out {
+  to {
+    opacity: 0;
+    transform: translateX(24px) scale(0.98);
+  }
+}
+@keyframes toast-timer {
+  from {
+    width: 100%;
+  }
+  to {
+    width: 0%;
+  }
+}
+
+/* indeterminate loading bar (table refresh) */
+@keyframes indeterminate {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(300%);
+  }
+}
+/* one-shot pulse for the "Updated" dot */
+@keyframes ping-once {
+  from {
+    transform: scale(1);
+    opacity: 0.8;
+  }
+  to {
+    transform: scale(3);
+    opacity: 0;
+  }
+}
