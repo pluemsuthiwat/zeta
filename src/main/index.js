@@ -34,7 +34,7 @@ if (!app.requestSingleInstanceLock()) {
     mainWindow = new BrowserWindow({
       width: 1320,
       height: 860,
-      minWidth: 1040,
+      minWidth: 1160, // the AP table's fixed columns fit without scrolling
       minHeight: 640,
       show: false,
       title: 'Zeta',

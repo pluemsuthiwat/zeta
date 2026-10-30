@@ -1,7 +1,7 @@
 // Talks to the ArubaOS 8.x REST API. Runs only in the main process: controllers use
 // self-signed certificates, so TLS verification is off and must never reach the renderer.
 import https from 'node:https'
-import { normalizeMac } from './macAddress.js'
+import { normalizeMac, formatMac } from './macAddress.js'
 
 const CONNECT_TIMEOUT_MS = 3000
 const REQUEST_TIMEOUT_MS = 8000
@@ -22,11 +22,26 @@ export class ArubaError extends Error {
  */
 export function forgetSession() {}
 
+/** Runs the functions given to it one at a time, in call order. */
+export function createLock() {
+  let tail = Promise.resolve()
+  return (fn) => {
+    const run = tail.then(fn, fn)
+    tail = run.catch(() => {})
+    return run
+  }
+}
+
 const IDLE_ACTIVE_S = 120 // another session idle less than this counts as "in use"
 const parseIdle = (t) => String(t || '').split(':').reduce((acc, x) => acc * 60 + (Number(x) || 0), 0)
 
 function rawRequest({ host, port, method, path, headers, body, agent, localAddress, via }) {
   return new Promise((resolve, reject) => {
+    if (localAddress === null) {
+      // the bound interface has no address right now; never fall back to system routing
+      reject(new ArubaError(describeNetError({ code: 'EADDRNOTAVAIL' }, host, port, via), { code: 'EADDRNOTAVAIL' }))
+      return
+    }
     let connected = false
     let local = null // our side of the socket, as the controller sees it
     const req = https.request(
@@ -102,11 +117,17 @@ function statusOk(s) {
  * Creates a client for one controller.
  * @param {{id:string, ipAddress:string, port:number, configNodePath?:string, username:string}} controller
  * @param {string} password decrypted password, kept only in memory
+ * @param {{localAddress?: string | (() => string | null), via?: string}} [opts] localAddress may be a
+ *   function, read on every request, so a long job follows its interface to a new DHCP address
+ *   (Wi-Fi reconnect while APs reboot); null = the interface has no address right now
+ * @param {(fn: () => Promise<any>) => Promise<any>} [opts.provisionLock] shared by every client of
+ *   one controller so their provision() calls run one at a time (see createLock)
  */
-export function createArubaClient(controller, password, { localAddress, via } = {}) {
+export function createArubaClient(controller, password, { localAddress, via, provisionLock = createLock() } = {}) {
   const host = controller.ipAddress
   const port = controller.port || 4343
-  const net = { localAddress, via } // source interface binding (undefined = system routing)
+  const bindAddress = () => (typeof localAddress === 'function' ? localAddress() : localAddress)
+  const netOpts = () => ({ localAddress: bindAddress(), via }) // source interface binding (undefined = system routing)
   const agent = new https.Agent({ rejectUnauthorized: false, keepAlive: true, maxSockets: 6 })
 
   async function login() {
@@ -115,7 +136,7 @@ export function createArubaClient(controller, password, { localAddress, via } = 
       host,
       port,
       agent,
-      ...net,
+      ...netOpts(),
       method: 'POST',
       path: '/v1/api/login',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(body) },
@@ -140,7 +161,8 @@ export function createArubaClient(controller, password, { localAddress, via } = 
   // One session per client (the window's and each job's), logged out on close() so the
   // controller doesn't collect idle API sessions. Single-flight: concurrent callers share a login.
   let current = null // { token, cookie, csrf, expiresAt } | { pending }
-  let localIp = localAddress || null // our address as the controller sees it
+  let localIp = bindAddress() || null // our address as the controller sees it
+  let flagLegend = {}
 
   async function session(force = false) {
     if (!force && current?.pending) return current.pending
@@ -166,7 +188,7 @@ export function createArubaClient(controller, password, { localAddress, via } = 
       host,
       port,
       agent,
-      ...net,
+      ...netOpts(),
       method: 'GET',
       path: `/v1/api/logout?${new URLSearchParams({ UIDARUBA: s.token })}`,
       headers: { Cookie: s.cookie, Accept: 'application/json' }
@@ -181,7 +203,7 @@ export function createArubaClient(controller, password, { localAddress, via } = 
       host,
       port,
       agent,
-      ...net,
+      ...netOpts(),
       method,
       path: `${path}?${qs}`,
       headers: {
@@ -240,7 +262,10 @@ export function createArubaClient(controller, password, { localAddress, via } = 
     host,
     port,
     via,
-    localAddress,
+    /** The bind address right now (undefined = Auto, null = the interface has no address). */
+    get localAddress() {
+      return bindAddress()
+    },
 
     async testConnection() {
       await session(true)
@@ -250,7 +275,14 @@ export function createArubaClient(controller, password, { localAddress, via } = 
     /** `show ap database long`, normalized. */
     async listAccessPoints() {
       const data = await showCommand('show ap database long')
+      const legend = parseFlagLegend(data)
+      if (Object.keys(legend).length) flagLegend = legend
       return extractRows(data).map(normalizeAp)
+    },
+
+    /** What each AP flag means, from the legend in the last `show ap database long` ({} before that). */
+    get flagLegend() {
+      return flagLegend
     },
 
     /** AP group names defined on this controller (`show ap-group`). */
@@ -261,45 +293,35 @@ export function createArubaClient(controller, password, { localAddress, via } = 
     },
 
     /** Provisioning values actually stored on the AP, or null fields when unreadable. */
-    async getProvisioning(apName) {
-      const data = await showCommand(`show ap details ap-name ${apName}`)
+    /** By wired MAC (AOS has no `show ap details serial-num`; a name can be shared mid-swap). */
+    async getProvisioning(ap) {
+      if (!normalizeMac(ap.mac)) return { found: false }
+      const data = await showCommand(`show ap details wired-mac ${formatMac(ap.mac)}`)
       return parseProvisioning(data)
     },
 
     /**
-     * Back-to-back calls for one AP: select it, stage the new values, check the staging is ours,
-     * then reprovision (the AP reboots).
-     * - Staging is checked field by field first, so a value the controller ignored or refused
-     *   never reboots the AP with half the change.
-     * - The controller's provisioning list is shared by every session (another Zeta, the WebUI):
-     *   right before the reboot we read it back and require exactly our AP with exactly our
-     *   values. If someone else is using it, nothing is rebooted (one retry after 3 s).
+     * Back-to-back calls for one AP: select it, stage the new values, then reprovision (the AP
+     * reboots). Staging is checked field by field first, so a value the controller ignored or
+     * refused never reboots the AP with half the change.
+     * @param {{serial: string, mac: string, ip?: string, name?: string}} ap the AP as found by
+     *   serial in the AP list; see buildProvisionPayload for which key each call uses.
+     * The provisioning list is shared by every session on the controller, so jobs in this app
+     * that write to the same controller take turns through `provisionLock`.
      */
     async provision(ap, requested) {
-      const { ap_reprovision, ...staging } = buildProvisionPayload(ap, requested)
-      let conflict = ''
-      for (let attempt = 1; attempt <= 2; attempt++) {
-        await postObjects({
-          clear_provisioning_ap_list: {},
-          read_bootinfo: { 'ap-name': ap.name }
-        })
+      const { read_bootinfo, ap_reprovision, ...staging } = buildProvisionPayload(ap, requested)
+      return provisionLock(async () => {
+        // Anything that fails before ap_reprovision is sent left the AP untouched: say so.
         try {
+          await postObjects({ clear_provisioning_ap_list: {}, read_bootinfo })
           await postObjects(staging)
         } catch (err) {
-          if (err.code === 'EREJECTED') err.message += '. The AP was not rebooted and nothing changed.'
+          err.beforeReboot = true
           throw err
         }
-        conflict = await stagingConflict(ap, requested)
-        if (!conflict) {
-          await postObjects({ ap_reprovision })
-          return
-        }
-        if (attempt === 1) await new Promise((r) => setTimeout(r, 3000))
-      }
-      throw new ArubaError(
-        `Another session is using this controller's provisioning list right now (another Zeta or the WebUI): ${conflict}. The AP was not rebooted.`,
-        { code: 'ECONFLICT' }
-      )
+        await postObjects({ ap_reprovision })
+      })
     },
 
     /** Other people active on the controller right now (not this computer), from `show loginsessions`. */
@@ -318,44 +340,6 @@ export function createArubaClient(controller, password, { localAddress, via } = 
       agent.destroy()
     }
   }
-
-  /** '' when the shared list holds only our AP with exactly our staged values, else why not. */
-  async function stagingConflict(ap, requested) {
-    const list = extractRows(await showCommand('show provisioning-ap-list'))
-    const serials = list.map((r) => pick(r, 'Serial #', 'Serial'))
-    if (list.length !== 1 || (ap.serial && serials[0] !== ap.serial)) {
-      return `the list holds ${list.length ? serials.join(', ') : 'nothing'} instead of only ${ap.serial || ap.name}`
-    }
-    const p = stagedParams(await showCommand('show provisioning-params'))
-    const want = {
-      'AP Name': requested.name || ap.name,
-      ...(requested.group ? { 'AP Group': requested.group } : {}),
-      ...(requested.network?.mode === 'static'
-        ? { 'IP Addr': requested.network.ip, Netmask: requested.network.netmask, Gateway: requested.network.gateway }
-        : requested.network?.mode === 'dhcp'
-          ? { 'IP Addr': '' }
-          : {}),
-      ...(requested.network?.dns ? { 'DNS IP': requested.network.dns } : {}),
-      ...(requested.master ? { Conductor: requested.master } : {})
-    }
-    for (const [k, v] of Object.entries(want)) {
-      const got = (k === 'Conductor' ? (p.Conductor ?? p.Master) : p[k]) ?? '' // "Master" before AOS 8.10
-      if (got !== v) return `staged ${k} is "${got || 'N/A'}", expected "${v || 'N/A'}"`
-    }
-    return ''
-  }
-}
-
-/** `show provisioning-params` → { 'AP Name': …, 'IP Addr': '' (for N/A), … } */
-export function stagedParams(data) {
-  const out = {}
-  for (const row of extractRows(data)) {
-    const k = row.Parameter ?? row.Item
-    if (k === undefined) continue
-    const v = String(row.Value ?? '').trim()
-    out[String(k).trim()] = UNSET.has(v.toLowerCase()) ? '' : v
-  }
-  return out
 }
 
 // ---------------------------------------------------------------------------
@@ -378,7 +362,20 @@ export const PROV_FIELDS = {
   serverIp: ['serverip', 'server-ip']
 }
 
+/**
+ * The AP is identified by Serial Number, but AOS 8.13.3.1 only takes a serial in ap_reprovision
+ * (checked against its own /api/AP-Provisioning.json and on the lab):
+ *   read_bootinfo             ap-name | ip-addr | wired-mac  → wired MAC of that serial's AP
+ *   copy_provisioning_params  ap-name | ip-addr              → its current IP; the controller
+ *                             refuses any AP that is not the one in the provisioning list
+ *   ap_reprovision            … | serial-num                 → the serial
+ * Names are never used to address an AP: the AP database shows a new name before the reboot,
+ * so during a name swap two APs share one name.
+ */
 export function buildProvisionPayload(ap, requested) {
+  if (!ap.serial) throw new ArubaError('The AP has no Serial Number. Nothing was written.', { code: 'EREJECTED' })
+  if (!normalizeMac(ap.mac)) throw new ArubaError(`AP ${ap.serial} has no wired MAC on the controller. Nothing was written.`, { code: 'EREJECTED' })
+  if (!ap.ip) throw new ArubaError(`AP ${ap.serial} has no IP address on the controller. Nothing was written.`, { code: 'EREJECTED' })
   const prov = {}
   const put = (field, action, value) => {
     const [obj, key] = PROV_FIELDS[field]
@@ -405,9 +402,10 @@ export function buildProvisionPayload(ap, requested) {
     put('serverIp', 'noop')
   }
   return {
-    copy_provisioning_params: { 'ap-name': ap.name },
+    read_bootinfo: { 'wired-mac': formatMac(ap.mac) },
+    copy_provisioning_params: { 'ip-addr': ap.ip },
     ap_prov: prov,
-    ap_reprovision: { 'ap-name': ap.name }
+    ap_reprovision: { 'serial-num': ap.serial }
   }
 }
 
@@ -458,8 +456,22 @@ export function normalizeAp(row) {
     uptime,
     mac: normalizeMac(pick(row, 'Wired MAC Address', 'MAC Address', 'MAC', 'Ethernet MAC')) || '',
     serial: pick(row, 'Serial #', 'Serial Number', 'Serial', 'SN'),
-    switchIp: pick(row, 'Switch IP')
+    switchIp: pick(row, 'Switch IP'),
+    flags: pick(row, 'Flags')
   }
+}
+
+/**
+ * The flags legend `show ap database long` sends in `_data`, e.g.
+ * "Flags: 1 = 802.1x authenticated AP use EAP-PEAP;   1+ = 802.1x use EST" → { '1': '802.1x…', '1+': … }.
+ */
+export function parseFlagLegend(data) {
+  const out = {}
+  for (const line of [].concat(data?._data || [])) {
+    const text = String(line).replace(/^\s*Flags:\s*/, '')
+    for (const m of text.matchAll(/(?:^|;|\s{2,})\s*([0-9A-Za-z][+-]?) = (.+?)(?=\s*;|\s{2,}|$)/g)) out[m[1]] = m[2].trim()
+  }
+  return out
 }
 
 const UNSET = new Set(['', 'n/a', 'na', 'none', '-', '0.0.0.0'])

@@ -1,11 +1,11 @@
 // IPC surface between the window and the main process (replaces the web app's /api routes).
 // Passwords only ever travel renderer -> main on add/edit; nothing secret is sent back.
-import { ipcMain, dialog, BrowserWindow, app } from 'electron'
+import { ipcMain, dialog, BrowserWindow, app, powerSaveBlocker } from 'electron'
 import { writeFile } from 'node:fs/promises'
 import { appendFileSync, mkdirSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
-import { createArubaClient, forgetSession } from './lib/arubaClient.js'
+import { createArubaClient, createLock, forgetSession } from './lib/arubaClient.js'
 import { countApStats, summarizeAps } from './lib/apStats.js'
 import { runLivePreview, toPreviewRow } from './lib/apLivePreview.js'
 import { runJob } from './lib/apJobRunner.js'
@@ -14,11 +14,25 @@ import { ImportFileError, MAX_BYTES } from './lib/apImport.js'
 import { isIpv4 } from './lib/ipv4.js'
 import { encryptPassword, decryptPassword } from './secrets.js'
 import { checkRateLimit } from './rateLimit.js'
-import { listInterfaces, resolveSource } from './netInterfaces.js'
-import { pingOnce } from './ping.js'
+import { currentAddress, listInterfaces, resolveSource, watchInterfaces } from './netInterfaces.js'
 
 const TERMINAL = ['ok', 'sent', 'failed', 'skipped']
 export const runningJobs = new Set()
+
+// Keep the computer awake while any job runs: asleep, a job stops mid-way and its APs end up
+// "failed" although they may have been provisioned. The display may still turn off.
+let sleepBlockId = null
+function jobStarted(jobId) {
+  runningJobs.add(jobId)
+  if (sleepBlockId === null) sleepBlockId = powerSaveBlocker.start('prevent-app-suspension')
+}
+function jobEnded(jobId) {
+  runningJobs.delete(jobId)
+  if (runningJobs.size === 0 && sleepBlockId !== null) {
+    powerSaveBlocker.stop(sleepBlockId)
+    sleepBlockId = null
+  }
+}
 
 const LOGS_KEPT = 30
 
@@ -59,13 +73,27 @@ export function registerIpc(store) {
 
   const SOURCE_KEY = 'sourceInterface'
 
+  // Jobs on one controller may run side by side; its provisioning list is shared, so their
+  // writes (clear → stage → reprovision) take turns.
+  const provisionLocks = new Map()
+  const provisionLockFor = (controllerId) => {
+    if (!provisionLocks.has(controllerId)) provisionLocks.set(controllerId, createLock())
+    return provisionLocks.get(controllerId)
+  }
+
   /** Every connection to a controller goes out through the chosen source interface. */
   async function newClient(controllerId) {
     const controller = store.getController(controllerId)
     if (!controller) throw new Error('This controller no longer exists.')
     const password = decryptPassword(store.getEncryptedPassword(controllerId))
-    const { localAddress, label } = await resolveSource(store.getSetting(SOURCE_KEY))
-    return createArubaClient(controller, password, { localAddress, via: label })
+    const name = store.getSetting(SOURCE_KEY)
+    const { label } = await resolveSource(name) // the interface must have an address to start
+    // Re-read on every request: a job outlives Wi-Fi reconnects (APs rebooting) and DHCP changes.
+    return createArubaClient(controller, password, {
+      localAddress: name ? () => currentAddress(name) : undefined,
+      via: label,
+      provisionLock: provisionLockFor(controllerId)
+    })
   }
 
   async function clientFor(controllerId) {
@@ -179,10 +207,15 @@ export function registerIpc(store) {
   // ---- access points ----
   handle('aps:list', async (id) => {
     checkRateLimit('listAccessPoints')
-    const aps = await withController(id, (c) => c.listAccessPoints())
+    let flagLegend = {}
+    const aps = await withController(id, async (c) => {
+      const list = await c.listAccessPoints()
+      flagLegend = c.flagLegend
+      return list
+    })
     const summary = summarizeAps(aps)
     store.updateController(id, { apStats: { managed: summary.managed, up: summary.up, down: summary.down } })
-    return { aps, summary }
+    return { aps, summary, flagLegend }
   })
 
   // ---- import ----
@@ -212,14 +245,50 @@ export function registerIpc(store) {
     if (!event.sender.isDestroyed()) event.sender.send('import:progress', { kind, ...p })
   }
 
+  // Jobs may overlap on one controller. What their unfinished APs are about to get isn't in the AP
+  // list yet, so the import checks it too: [{ serial, row, status, name, ip, offName, offIp }].
+  function inFlightFor(controllerId) {
+    const out = []
+    for (const job of store.listJobs(controllerId)) {
+      if (!['queued', 'running'].includes(job.status)) continue
+      for (const it of store.getJobItems(job.id)) {
+        if (!it.serial || ['ok', 'sent', 'failed', 'skipped'].includes(it.status)) continue
+        const net = it.requested?.network
+        const fromIp = it.before?.ip
+        out.push({
+          serial: it.serial,
+          row: it.rowNumber,
+          status: it.status,
+          name: it.requested?.name || null,
+          ip: net?.mode === 'static' ? net.ip : null,
+          offName: Boolean(it.requested?.name),
+          offIp: Boolean(net) && (net.mode === 'dhcp' || net.ip !== fromIp)
+        })
+      }
+    }
+    return out
+  }
+
+  /** APs in the file that a running job is still writing or verifying. */
+  function warnBusyAps(rows, inFlight) {
+    const busy = new Map(inFlight.map((f) => [f.serial.toLowerCase(), f]))
+    for (const r of rows) {
+      if (!r.ap || r.status === 'error') continue
+      const f = busy.get((r.ap.serial || '').toLowerCase())
+      if (f) r.warnings.push(`This AP is still ${f.status} in a running job (row ${f.row}). Its values may change when that job finishes.`)
+    }
+  }
+
   handle('import:preview', async (id, bytes, event) => {
     checkRateLimit('preview')
     const buf = toBuffer(bytes)
+    const inFlight = inFlightFor(id)
     const { rows, summary, provisioning, otherSessions } = await withController(id, async (c) => ({
-      ...(await runLivePreview(c, buf, { onProgress: progressTo(event, 'preview') })),
+      ...(await runLivePreview(c, buf, { inFlight, onProgress: progressTo(event, 'preview') })),
       // Someone else working on this controller can step on its shared provisioning list.
       otherSessions: await c.otherSessions().catch(() => [])
     }))
+    warnBusyAps(rows, inFlight)
     previewReads.set(readsKey(id, buf), { provisioning, at: Date.now() })
     return { rows: rows.map(toPreviewRow), summary: { ...summary, otherSessions } }
   })
@@ -229,15 +298,14 @@ export function registerIpc(store) {
   handle('import:apply', async (id, bytes, confirmReboot, event) => {
     checkRateLimit('apply')
     if (confirmReboot !== true) throw new Error('Confirm that every applied AP will reboot.')
-    const busy = 'Another provisioning job is still running on this controller.'
-    if (store.activeJob(id)) throw new Error(busy)
     const buf = toBuffer(bytes)
     const cached = previewReads.get(readsKey(id, buf))
     const known = cached && Date.now() - cached.at < PREVIEW_READS_TTL ? cached.provisioning : null
-    const { rows } = await withController(id, (c) => runLivePreview(c, buf, { known, onProgress: progressTo(event, 'apply') }))
+    const { rows } = await withController(id, (c) =>
+      runLivePreview(c, buf, { known, inFlight: inFlightFor(id), onProgress: progressTo(event, 'apply') })
+    )
     const ready = rows.filter((r) => r.status === 'ready' || r.status === 'notup')
     if (!ready.length) throw new Error('Nothing in this file can be applied. Fix the errors and upload it again.')
-    if (store.activeJob(id)) throw new Error(busy)
     const job = store.createJob(
       id,
       ready.map((r) => ({
@@ -258,16 +326,14 @@ export function registerIpc(store) {
   // The job gets its own client (own sockets), so Test Connection or Edit on the cached UI
   // client can never cut a write in flight.
   function startJob(jobId, controllerId) {
-    runningJobs.add(jobId)
+    jobStarted(jobId)
     newClient(controllerId).then(
       (client) => {
-        // IP chains ping holders through the same source interface as the controller traffic
-        const ping = (ip) => pingOnce(ip, { source: client.localAddress })
-        runJob(jobId, { store, client, ping, log: jobLogger(jobId) })
+        runJob(jobId, { store, client, log: jobLogger(jobId) })
           .catch((err) => console.error('[job]', err))
           .finally(() => {
             client.close()
-            runningJobs.delete(jobId)
+            jobEnded(jobId)
           })
       },
       (err) => {
@@ -275,19 +341,25 @@ export function registerIpc(store) {
           store.updateItem(item.id, { status: 'failed', message: 'Nothing was written.', finishedAt: Date.now() })
         }
         store.updateJob(jobId, { status: 'failed', message: `Could not start: ${err.message}`, finishedAt: Date.now() })
-        runningJobs.delete(jobId)
+        jobEnded(jobId)
       }
     )
   }
 
   // ---- source interface ----
   handle('net:list', async () => ({ selected: store.getSetting(SOURCE_KEY), interfaces: await listInterfaces() }))
+  // Push address changes so the header shows the new IP without opening the picker.
+  const stopWatch = watchInterfaces((interfaces) => {
+    const payload = { selected: store.getSetting(SOURCE_KEY), interfaces }
+    for (const w of BrowserWindow.getAllWindows()) if (!w.isDestroyed()) w.webContents.send('net:changed', payload)
+  })
+  app.on('will-quit', stopWatch)
   handle('net:set', async (name) => {
     const value = name || null
     if (value) await resolveSource(value) // must exist and have an IPv4 address now
     store.setSetting(SOURCE_KEY, value)
     // New connections only: cached sessions/sockets were made through the old interface.
-    // A running job keeps the client it started with.
+    // A running job keeps the interface it started with (following its address changes).
     for (const id of [...clients.keys()]) dropClient(id)
     return value
   })

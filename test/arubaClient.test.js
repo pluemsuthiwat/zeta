@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { createArubaClient, forgetSession, parseApStatus, parseProvisioning, extractRows, buildProvisionPayload } from '../src/main/lib/arubaClient.js'
+import { createArubaClient, createLock, forgetSession, parseFlagLegend, normalizeAp, parseApStatus, parseProvisioning, extractRows, buildProvisionPayload } from '../src/main/lib/arubaClient.js'
 import { startMockController, makeAps } from '../scripts/mock-controller.mjs'
 
 describe('parsing', () => {
@@ -57,19 +57,20 @@ describe('against the mock controller (HTTPS, self-signed)', () => {
   it('provisions an AP and the change shows up after its reboot', async () => {
     forgetSession('c4')
     const c = createArubaClient({ ...controller(), id: 'c4' }, 'admin')
-    await c.provision({ name: 'AP-002' }, { name: 'Lobby-02', network: { mode: 'static', ip: '10.30.0.5', netmask: '255.255.255.0', gateway: '10.30.0.1' } })
+    const target = (await c.listAccessPoints()).find((a) => a.serial === 'CNM100002') // found by serial, like a job
+    await c.provision(target, { name: 'Lobby-02', network: { mode: 'static', ip: '10.30.0.5', netmask: '255.255.255.0', gateway: '10.30.0.1' } })
     expect((await c.listAccessPoints()).find((a) => a.serial === 'CNM100002').status).toBe('rebooting')
     await new Promise((r) => setTimeout(r, 300))
     const after = (await c.listAccessPoints()).find((a) => a.serial === 'CNM100002')
     expect(after).toMatchObject({ name: 'Lobby-02', ip: '10.30.0.5', status: 'up' })
-    expect(await c.getProvisioning('Lobby-02')).toMatchObject({ found: true, ipMode: 'static', ip: '10.30.0.5', gateway: '10.30.0.1' })
+    expect(await c.getProvisioning(after)).toMatchObject({ found: true, ipMode: 'static', ip: '10.30.0.5', gateway: '10.30.0.1' })
     c.close()
   })
 
   it('reports which part the controller rejected', async () => {
     forgetSession('c5')
     const c = createArubaClient({ ...controller(), id: 'c5' }, 'admin')
-    await expect(c.provision({ name: 'NOPE' }, { group: 'g' })).rejects.toThrow(/rejected read_bootinfo: AP not found/)
+    await expect(c.provision({ serial: 'NOPE', mac: 'aabbccddeeff', ip: '10.9.9.9' }, { group: 'g' })).rejects.toThrow(/rejected read_bootinfo: AP not found/)
     c.close()
   })
 })
@@ -93,9 +94,45 @@ describe('real AOS 8.13.3.1 output (lab controller)', () => {
   })
 })
 
+describe('AP flags (real AOS 8.13.3.1 output, MAINLAB-WLC-1)', () => {
+  const data = {
+    _data: [
+      'Flags: 1 = 802.1x authenticated AP use EAP-PEAP;   1+ = 802.1x use EST;    1- = 802.1x use factory cert',
+      '2 = Using IKE version 2;                    4 = WiFi Uplink',
+      'B = Built-in AP;                            C = Cellular RAP;       D = Dirty or no config',
+      'G = No such group;        I = Inactive;     J = USB cert at AP;     L = Unlicensed',
+      'N = Duplicate name;       P = PPPoe AP;     R = Remote AP;          R- = Remote AP requires Auth',
+      'u = Custom-Cert RAP;           z = Datazone AP',
+      '4'
+    ]
+  }
+  it('parses the legend, including two-character flags like 1+ and R-', () => {
+    const l = parseFlagLegend(data)
+    expect(l).toMatchObject({
+      1: '802.1x authenticated AP use EAP-PEAP',
+      '1+': '802.1x use EST',
+      '1-': '802.1x use factory cert',
+      2: 'Using IKE version 2',
+      4: 'WiFi Uplink',
+      D: 'Dirty or no config',
+      G: 'No such group',
+      L: 'Unlicensed',
+      N: 'Duplicate name',
+      'R-': 'Remote AP requires Auth',
+      z: 'Datazone AP'
+    })
+    expect(Object.keys(l)).not.toContain('4\n')
+  })
+  it('reads each AP\'s Flags column', () => {
+    expect(normalizeAp({ Name: 'ZNC-TEMP-AP01', Flags: 'N2', Status: 'Down' }).flags).toBe('N2')
+    expect(normalizeAp({ Name: 'x', Status: 'Up 1m' }).flags).toBe('')
+  })
+})
+
 describe('buildProvisionPayload (field names verified on AOS 8.13.3.1)', () => {
+  const AP = { name: 'ZNC-TEMP-AP02', serial: 'CNDPJ0T6DX', mac: '20a6cdc80bac', ip: '192.168.222.72' }
   it('static IP uses ipaddr / netmask / gatewayip / dnsip', () => {
-    const p = buildProvisionPayload({ name: 'AP' }, { name: 'N', network: { mode: 'static', ip: '10.0.0.5', netmask: '255.255.255.0', gateway: '10.0.0.1', dns: '8.8.8.8' } })
+    const p = buildProvisionPayload(AP, { name: 'N', network: { mode: 'static', ip: '10.0.0.5', netmask: '255.255.255.0', gateway: '10.0.0.1', dns: '8.8.8.8' } })
     expect(p.ap_prov).toMatchObject({
       ap_name: { _action: 'modify', 'ap-name': 'N' },
       ap_group: { _action: 'noop' },
@@ -106,12 +143,24 @@ describe('buildProvisionPayload (field names verified on AOS 8.13.3.1)', () => {
       master: { _action: 'noop' },
       serverip: { _action: 'noop' }
     })
-    expect(Object.keys(p)).toEqual(['copy_provisioning_params', 'ap_prov', 'ap_reprovision'])
+    expect(Object.keys(p)).toEqual(['read_bootinfo', 'copy_provisioning_params', 'ap_prov', 'ap_reprovision'])
+  })
+  it('addresses the AP by MAC / IP / serial, never by name (only keys AOS accepts for each call)', () => {
+    const p = buildProvisionPayload(AP, { name: 'N' })
+    expect(p.read_bootinfo).toEqual({ 'wired-mac': '20:a6:cd:c8:0b:ac' }) // AOS wants XX:XX:XX:XX:XX:XX
+    expect(p.copy_provisioning_params).toEqual({ 'ip-addr': '192.168.222.72' })
+    expect(p.ap_reprovision).toEqual({ 'serial-num': 'CNDPJ0T6DX' })
+    expect(JSON.stringify([p.read_bootinfo, p.copy_provisioning_params, p.ap_reprovision])).not.toContain('ap-name')
+  })
+  it('writes nothing for an AP without serial, MAC or IP', () => {
+    expect(() => buildProvisionPayload({ ...AP, serial: '' }, { name: 'N' })).toThrow(/no Serial Number\. Nothing was written/)
+    expect(() => buildProvisionPayload({ ...AP, mac: '' }, { name: 'N' })).toThrow(/no wired MAC/)
+    expect(() => buildProvisionPayload({ ...AP, ip: '' }, { name: 'N' })).toThrow(/no IP address/)
   })
   it('DHCP deletes the four static fields; master sets master and server-ip', () => {
-    const d = buildProvisionPayload({ name: 'AP' }, { network: { mode: 'dhcp' } }).ap_prov
+    const d = buildProvisionPayload(AP, { network: { mode: 'dhcp' } }).ap_prov
     for (const k of ['ipaddr', 'netmask', 'gatewayip', 'dnsip']) expect(d[k]).toEqual({ _action: 'delete' })
-    const m = buildProvisionPayload({ name: 'AP' }, { master: '10.9.9.9' }).ap_prov
+    const m = buildProvisionPayload(AP, { master: '10.9.9.9' }).ap_prov
     expect(m.master).toEqual({ _action: 'modify', master: '10.9.9.9' })
     expect(m.serverip).toEqual({ _action: 'modify', 'server-ip': '10.9.9.9' })
   })
@@ -126,9 +175,10 @@ describe('a controller that silently ignores a field', () => {
   it('fails before the reboot and leaves the AP untouched', async () => {
     forgetSession('strict')
     const c = createArubaClient({ id: 'strict', ipAddress: '127.0.0.1', port: strict.port, username: 'admin' }, 'admin')
+    const target = (await c.listAccessPoints()).find((a) => a.serial === 'CNM100001')
     await expect(
-      c.provision({ name: 'AP-001' }, { name: 'X', network: { mode: 'static', ip: '10.30.0.5', netmask: '255.255.255.0', gateway: '10.30.0.1' } })
-    ).rejects.toThrow(/ap_prov\.ipaddr: not recognized by this controller\. The AP was not rebooted/)
+      c.provision(target, { name: 'X', network: { mode: 'static', ip: '10.30.0.5', netmask: '255.255.255.0', gateway: '10.30.0.1' } })
+    ).rejects.toMatchObject({ beforeReboot: true, message: expect.stringMatching(/ap_prov\.ipaddr: not recognized by this controller/) })
     const ap = (await c.listAccessPoints()).find((a) => a.serial === 'CNM100001')
     expect(ap).toMatchObject({ name: 'AP-001', status: 'up' })
     c.close()
@@ -153,9 +203,22 @@ describe('source interface binding', () => {
     await expect(c.testConnection()).rejects.toThrow(/source interface LAN \(en7\) lost its IP address/)
     c.close()
   })
+  it('follows the interface to its new address (Wi-Fi reconnect mid-job)', async () => {
+    forgetSession('bind3')
+    let addr = '10.255.255.254' // the address the interface had when the job started
+    const c = createArubaClient({ id: 'bind3', ipAddress: '127.0.0.1', port: m.port, username: 'admin' }, 'admin', { localAddress: () => addr, via: 'Wi-Fi (en0)' })
+    await expect(c.listAccessPoints()).rejects.toThrow(/lost its IP address/)
+    addr = null // disconnected: no address at all, must not fall back to system routing
+    await expect(c.listAccessPoints()).rejects.toThrow(/source interface Wi-Fi \(en0\) lost its IP address/)
+    expect(c.localAddress).toBeNull()
+    addr = '127.0.0.1' // reconnected with a new address
+    expect(await c.listAccessPoints()).toHaveLength(2)
+    expect(c.localAddress).toBe('127.0.0.1')
+    c.close()
+  })
 })
 
-describe('shared provisioning list guard (another Zeta / the WebUI)', () => {
+describe('shared provisioning list (jobs side by side)', () => {
   let m
   beforeAll(async () => {
     m = await startMockController({ port: 0, aps: makeAps(3), rebootMs: 200 })
@@ -164,24 +227,30 @@ describe('shared provisioning list guard (another Zeta / the WebUI)', () => {
   const client = (id) => createArubaClient({ id, ipAddress: '127.0.0.1', port: m.port, username: 'admin' }, 'admin')
   const ap = (aps, serial) => aps.find((a) => a.serial === serial)
 
-  it('retries once when someone else grabs the list, then provisions', async () => {
-    const c = client('g1')
-    m.hijackAfterStaging('CNM100003', 1)
-    await c.provision({ name: 'AP-001', serial: 'CNM100001' }, { name: 'G1' })
+  it('two clients on one controller take turns on the shared list (two jobs at once)', async () => {
+    const lock = createLock()
+    const a = createArubaClient({ id: 'g1', ipAddress: '127.0.0.1', port: m.port, username: 'admin' }, 'admin', { provisionLock: lock })
+    const b = createArubaClient({ id: 'g2', ipAddress: '127.0.0.1', port: m.port, username: 'admin' }, 'admin', { provisionLock: lock })
+    const list = await a.listAccessPoints()
+    await Promise.all([a.provision(ap(list, 'CNM100001'), { name: 'G1' }), b.provision(ap(list, 'CNM100002'), { name: 'G2' })])
     await new Promise((r) => setTimeout(r, 300))
-    expect(ap(await c.listAccessPoints(), 'CNM100001').name).toBe('G1')
-    await c.close()
+    const aps = await a.listAccessPoints()
+    expect(ap(aps, 'CNM100001').name).toBe('G1')
+    expect(ap(aps, 'CNM100002').name).toBe('G2')
+    await Promise.all([a.close(), b.close()])
   })
 
-  it('does not reboot when the list keeps being taken, and says why', async () => {
-    const c = client('g2')
-    m.hijackAfterStaging('CNM100003', 2)
-    await expect(c.provision({ name: 'AP-002', serial: 'CNM100002' }, { name: 'G2' })).rejects.toThrow(
-      /Another session is using this controller's provisioning list.*holds CNM100003 instead of only CNM100002.*not rebooted/
-    )
-    await new Promise((r) => setTimeout(r, 300))
-    expect(ap(await c.listAccessPoints(), 'CNM100002')).toMatchObject({ name: 'AP-002', status: 'up' })
-    await c.close()
+  it('the lock runs one function at a time and survives a failure', async () => {
+    const lock = createLock()
+    const order = []
+    const job = (n, fail) => lock(async () => {
+      order.push(`start${n}`)
+      await new Promise((r) => setTimeout(r, 10))
+      order.push(`end${n}`)
+      if (fail) throw new Error('x')
+    })
+    await Promise.allSettled([job(1, true), job(2)])
+    expect(order).toEqual(['start1', 'end1', 'start2', 'end2'])
   })
 
   it('logs out on close and does not count this computer as "someone else"', async () => {

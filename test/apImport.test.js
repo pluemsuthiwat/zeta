@@ -23,7 +23,8 @@ describe('readWorkbook', () => {
     expect(rows.map((r) => [r.rowNumber, r.values.serial])).toEqual([[1, 'S1'], [2, 'S2']])
   })
   it('rejects a file without an identifier or change column', async () => {
-    await expect(readWorkbook(await makeXlsx(['Name'], [['x']]))).rejects.toThrow(/Serial Number or MAC/)
+    await expect(readWorkbook(await makeXlsx(['Name'], [['x']]))).rejects.toThrow(/needs a Serial Number column/)
+    await expect(readWorkbook(await makeXlsx(['MAC', 'Name'], [['aabbcc000001', 'x']]))).rejects.toThrow(/needs a Serial Number column/)
     await expect(readWorkbook(await makeXlsx(['Serial'], [['S1']]))).rejects.toThrow(/at least one column/)
   })
   it('rejects .xls and non-xlsx bytes', async () => {
@@ -38,27 +39,34 @@ describe('readWorkbook', () => {
     const { rows } = await readWorkbook(await buildTemplate('static'))
     expect(rows[0].values).toMatchObject({ serial: 'ABC123456', ip: '192.168.1.50', dns: '8.8.8.8' })
   })
+  it('templates keep the MAC Address column (for the user\'s records; import ignores it)', async () => {
+    const { columns, rows } = await readWorkbook(await buildTemplate('static'))
+    expect(columns[0]).toBe('serial')
+    expect(rows[0].values.mac).toBeUndefined()
+    const [r] = validateRows(rows.map((x) => ({ ...x, values: { ...x.values, serial: 'S1' } })), APS)
+    expect(r.errors).toEqual([])
+  })
 })
 
-describe('validateRows: identifying the AP', () => {
-  it('finds by serial, or by MAC when serial is empty', async () => {
-    const r = await check(['Serial', 'MAC', 'Name'], [['S1', '', 'A2'], ['', 'aa-bb-cc-00-00-02', 'B2']])
-    expect(r.map((x) => x.status)).toEqual(['ready', 'ready'])
-    expect(r[1].ap.name).toBe('B')
+describe('validateRows: identifying the AP (Serial Number only)', () => {
+  it('finds the AP by serial (case-insensitive)', async () => {
+    const [r] = await check(['Serial', 'Name'], [['s1', 'A2']])
+    expect(r.status).toBe('ready')
+    expect(r.ap.name).toBe('A')
   })
-  it('errors when serial and MAC disagree', async () => {
-    const [r] = await check(['Serial', 'MAC', 'Name'], [['S1', 'aabbcc000002', 'Z']])
-    expect(r.status).toBe('error')
-    expect(r.errors[0]).toMatch(/belongs to MAC/)
+  it('a row without a serial is an error, even with a MAC; a MAC column is ignored', async () => {
+    const r = await check(['Serial', 'MAC', 'Name'], [['', 'aabbcc000002', 'B2'], ['S1', 'aabbcc000002', 'A2']])
+    expect(r[0].status).toBe('error')
+    expect(r[0].errors).toEqual(['The row has no Serial Number.'])
+    expect(r[1].status).toBe('ready')
+    expect(r[1].ap.name).toBe('A')
   })
-  it('errors on bad MAC, unknown AP, and missing identifier', async () => {
-    const r = await check(['Serial', 'MAC', 'Name', 'Group'], [['', 'aabbcc', 'x', ''], ['NOPE', '', 'y', ''], ['', '', '', 'g']])
-    expect(r[0].errors[0]).toMatch(/12 hexadecimal/)
-    expect(r[1].errors[0]).toMatch(/No AP with Serial Number NOPE/)
-    expect(r[2].errors[0]).toMatch(/no Serial Number or MAC/)
+  it('errors on an unknown serial', async () => {
+    const [r] = await check(['Serial', 'Name'], [['NOPE', 'y']])
+    expect(r.errors[0]).toMatch(/No AP with Serial Number NOPE/)
   })
-  it('flags every row that targets the same AP, even via serial vs MAC', async () => {
-    const r = await check(['Serial', 'MAC', 'Group'], [['S1', '', 'g1'], ['', 'aabbcc000001', 'g2']])
+  it('flags every row that targets the same AP', async () => {
+    const r = await check(['Serial', 'Group'], [['S1', 'g1'], ['s1', 'g2']])
     expect(r[0].errors[0]).toMatch(/also in row 2/)
     expect(r[1].errors[0]).toMatch(/also in row 1/)
   })
@@ -182,7 +190,7 @@ describe('validateRows: IP and master', () => {
 describe('runLivePreview', () => {
   const client = (prov) => ({
     listAccessPoints: async () => APS,
-    getProvisioning: async (name) => prov[name] ?? { found: false }
+    getProvisioning: async (a) => prov[a.name] ?? { found: false }
   })
   const H = ['Serial', 'IP', 'Netmask', 'Gateway', 'Master']
   it('drops network/master values the AP already has, keeps unreadable ones', async () => {
@@ -217,7 +225,7 @@ describe('runLivePreview at scale', () => {
     return {
       reads,
       listAccessPoints: async () => aps,
-      getProvisioning: async (name) => {
+      getProvisioning: async ({ name }) => {
         reads.push(name)
         return prov(Number(name.slice(2)))
       }
@@ -260,5 +268,87 @@ describe('AP group must exist on the controller', () => {
     expect(rows[2].status).toBe('ready')
     expect(rows[3].errors).toEqual([])
     expect(rows[3].warnings.some((w) => /must exist on the new controller 10\.9\.9\.9/.test(w))).toBe(true)
+  })
+})
+
+describe('re-importing after a partly failed job (two APs share a value)', () => {
+  // A (S1) and B (S2) both on .12: A got B's old IP, B's own write failed.
+  const CLASH = [
+    ap({ name: 'A', serial: 'S1', mac: 'aabbcc000001', ip: '10.0.0.12' }),
+    ap({ name: 'B', serial: 'S2', mac: 'aabbcc000002', ip: '10.0.0.12' }),
+    ap({ name: 'C', serial: 'S3', mac: 'aabbcc000003', ip: '10.0.0.13' })
+  ]
+  const H = ['Serial', 'IP', 'Netmask', 'Gateway']
+  it('the same file again: the AP that already has its IP is not blocked by the other', async () => {
+    const r = await check(H, [['S1', '10.0.0.12', '255.255.255.0', '10.0.0.1'], ['S2', '10.0.0.11', '255.255.255.0', '10.0.0.1']], CLASH)
+    expect(r.map((x) => x.errors)).toEqual([[], []])
+    expect(r[1].status).toBe('ready')
+  })
+  it('a third AP wanting the shared IP is blocked by every holder that keeps it', async () => {
+    // A moves off .12, B stays on it: C must not get .12
+    const r = await check(H, [['S1', '10.0.0.20', '255.255.255.0', '10.0.0.1'], ['S3', '10.0.0.12', '255.255.255.0', '10.0.0.1']], CLASH)
+    expect(r[0].status).toBe('ready')
+    expect(r[1].errors).toEqual(['IP 10.0.0.12 is already used by AP B.'])
+  })
+  it('a value the AP already has provisioned (seen by the live read) stops blocking', async () => {
+    // The AP list still shows C on .13, but .12 is already provisioned on it (not rebooted yet)
+    const client = {
+      listAccessPoints: async () => CLASH,
+      getProvisioning: async ({ name }) =>
+        name === 'C' ? { found: true, ipMode: 'static', ip: '10.0.0.12', netmask: '255.255.255.0', gateway: '10.0.0.1' } : { found: false }
+    }
+    const { rows } = await runLivePreview(client, await makeXlsx(H, [['S3', '10.0.0.12', '255.255.255.0', '10.0.0.1']]))
+    expect(rows[0].errors).toEqual([])
+    expect(rows[0].status).toBe('nochange')
+  })
+  it('two rows asking for the same name or IP in one file are still errors', async () => {
+    const r = await check(['Serial', 'Name', 'IP', 'Netmask', 'Gateway'], [
+      ['S1', 'X', '10.0.0.30', '255.255.255.0', '10.0.0.1'],
+      ['S3', 'X', '10.0.0.30', '255.255.255.0', '10.0.0.1']
+    ], CLASH)
+    expect(r.every((x) => x.status === 'error')).toBe(true)
+    expect(r[0].errors.join(' ')).toMatch(/New name "X" is also used in row 2.*IP 10\.0\.0\.30 is also used in row 2/)
+  })
+})
+
+describe('summary: most common errors', () => {
+  it('groups unknown serials into one line, with or without digits in the serial', async () => {
+    const { summarize } = await import('../src/main/lib/apLivePreview.js')
+    const rows = ['CN4KKBFP24', 'CNSDJKLZMT', 'CNRPZWDFRZ', 'CNNGHMVMYV'].map((sn) => ({
+      status: 'error',
+      errors: [`No AP with Serial Number ${sn} was found on this controller.`]
+    }))
+    expect(summarize(rows).topErrors).toEqual([{ reason: 'No AP with Serial Number … was found on this controller.', count: 4 }])
+  })
+  it('keeps short words like MAC, DHCP and IP as text', async () => {
+    const { summarize } = await import('../src/main/lib/apLivePreview.js')
+    const { topErrors } = summarize([{ status: 'error', errors: ['With IP set to DHCP, Netmask, Gateway and DNS must be empty.'] }])
+    expect(topErrors[0].reason).toBe('With IP set to DHCP, Netmask, Gateway and DNS must be empty.')
+  })
+})
+
+describe('another job still running on this controller (in flight)', () => {
+  const H = ['Serial', 'Name', 'IP', 'Netmask', 'Gateway']
+  // Job 1 is moving B (S2) from "B" / .12 to "B-NEW" / .20 — the AP list doesn't show it yet
+  const JOB1 = [{ serial: 'S2', row: 7, status: 'verifying', name: 'B-NEW', ip: '10.0.0.20', offName: true, offIp: true }]
+  const checkWith = async (rows, inFlight) => validateRows((await readWorkbook(await makeXlsx(H, rows))).rows, APS, inFlight)
+
+  it('a name or IP that a running job is setting on another AP is an error', async () => {
+    const r = await checkWith([['S1', 'B-NEW', '', '', ''], ['S3', '', '10.0.0.20', '255.255.255.0', '10.0.0.1']], JOB1)
+    expect(r[0].errors).toEqual(['Name "B-NEW" is being set on AP S2 by a provisioning job that is still running (its row 7).'])
+    expect(r[1].errors).toEqual(['IP 10.0.0.20 is being set on AP S2 by a provisioning job that is still running (its row 7).'])
+  })
+  it('the name and IP that the running job moves its AP off are free for this file', async () => {
+    const r = await checkWith([['S1', 'B', '10.0.0.12', '255.255.255.0', '10.0.0.1']], JOB1)
+    expect(r[0].errors).toEqual([])
+    expect(r[0].status).toBe('ready')
+  })
+  it('without a running job, the same file is checked against the AP list as before', async () => {
+    const r = await checkWith([['S1', 'B', '10.0.0.12', '255.255.255.0', '10.0.0.1']], [])
+    expect(r[0].errors.join(' ')).toMatch(/Name "B" is already used by AP B/)
+  })
+  it('the AP that the running job itself is changing does not block its own row', async () => {
+    const r = await checkWith([['S2', 'B-NEW', '10.0.0.20', '255.255.255.0', '10.0.0.1']], JOB1)
+    expect(r[0].errors).toEqual([])
   })
 })

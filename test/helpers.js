@@ -28,7 +28,8 @@ export function ap(overrides) {
  * In-memory controller for the job runner. State is computed from Date.now(), so it follows
  * vitest fake timers. `behavior(serial)` returns 'normal' | 'ignore' | 'reject' | 'lost' | 'partial' (reboots, applies name/group but not the IP).
  */
-export function fakeController(aps, { behavior = () => 'normal', downAfterMs = 5000, upAfterMs = 60_000 } = {}) {
+// renameAtOnce: like AOS, the AP database shows the new name right after the write, before the reboot
+export function fakeController(aps, { behavior = () => 'normal', downAfterMs = 5000, upAfterMs = 60_000, renameAtOnce = false } = {}) {
   const state = aps.map((a) => ({ ...a }))
   const transitions = [] // { serial, downAt, upAt, apply }
   const writes = []
@@ -49,10 +50,6 @@ export function fakeController(aps, { behavior = () => 'normal', downAfterMs = 5
 
   return {
     writes,
-    /** Fake ICMP: an address answers while an Up (not rebooting) AP holds it. */
-    async ping(ip) {
-      return current().some((a) => a.ip === ip && a.status === 'up')
-    },
     async listAccessPoints() {
       return current()
     },
@@ -60,8 +57,9 @@ export function fakeController(aps, { behavior = () => 'normal', downAfterMs = 5
       return { found: false }
     },
     async provision(apRef, requested) {
-      writes.push({ name: apRef.name, requested, at: Date.now() })
-      const target = state.find((a) => a.name === apRef.name)
+      writes.push({ name: apRef.name, serial: apRef.serial, mac: apRef.mac, ip: apRef.ip, requested, at: Date.now() })
+      const target = state.find((a) => a.serial === apRef.serial) // addressed like the real client: never by name
+      if (!target) throw Object.assign(new Error('The controller rejected read_bootinfo: AP not found'), { code: 'EREJECTED' })
       const b = behavior(target.serial)
       if (b === 'reject') {
         const err = new Error('The controller rejected ap_prov: invalid value')
@@ -73,6 +71,7 @@ export function fakeController(aps, { behavior = () => 'normal', downAfterMs = 5
       if (requested.name) apply.name = requested.name
       if (requested.group) apply.group = requested.group
       if (requested.network?.mode === 'static' && b !== 'partial') apply.ip = requested.network.ip
+      if (renameAtOnce && requested.name) target.name = requested.name
       const now = Date.now()
       transitions.push({ serial: target.serial, downAt: now + downAfterMs, upAt: now + upAfterMs, apply, lost: b === 'lost' })
     }

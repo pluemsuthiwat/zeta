@@ -52,7 +52,7 @@ async function run(items, controller) {
 }
 
 describe('runJob', () => {
-  it('verifies renames and static IPs, low risk first, 1.5 s apart', async () => {
+  it('verifies renames and static IPs, low risk first, back to back', async () => {
     const c = fakeController(APS)
     const { job, byRow } = await run(
       [
@@ -62,11 +62,37 @@ describe('runJob', () => {
       c
     )
     expect(c.writes.map((w) => w.name)).toEqual(['B', 'A']) // low risk first
-    expect(c.writes[1].at - c.writes[0].at).toBeGreaterThanOrEqual(1500)
+    expect(c.writes[1].at - c.writes[0].at).toBeLessThan(1500) // no gap between writes
     expect(byRow[1].status).toBe('ok')
     expect(byRow[2].status).toBe('ok')
     expect(byRow[1].before).toEqual({ name: 'A', group: 'default', ip: '10.0.0.11' })
     expect(job.status).toBe('done')
+  })
+
+  it('a timeout before the reboot step says the AP was not rebooted; after it, that it may have been', async () => {
+    const c = fakeController(APS)
+    c.provision = async (apRef) => {
+      const err = Object.assign(new Error('The controller did not answer within 8 seconds.'), { code: 'ETIMEOUT' })
+      if (apRef.serial === 'S1') err.beforeReboot = true
+      throw err
+    }
+    const { byRow } = await run([item(1, 0, { name: 'X1' }), item(2, 1, { name: 'X2' })], c)
+    expect(byRow[1].message).toBe('The controller did not answer within 8 seconds. The AP was not rebooted and nothing changed.')
+    expect(byRow[2].message).toMatch(/may or may not have reached the AP/)
+  })
+
+  it('name swap: each AP is addressed by its serial/MAC/IP even after the other already took its name', async () => {
+    // A↔B on a controller that shows the new name at once (what broke CNDPJ0T6DX on the lab)
+    const c = fakeController(APS, { renameAtOnce: true })
+    const { byRow } = await run([item(1, 0, { name: 'B' }), item(2, 1, { name: 'A' })], c)
+    expect(c.writes.map((w) => [w.serial, w.mac, w.ip])).toEqual([
+      ['S1', 'aabbcc000001', '10.0.0.11'],
+      ['S2', 'aabbcc000002', '10.0.0.12']
+    ])
+    expect(byRow[1].status).toBe('ok')
+    expect(byRow[2].status).toBe('ok')
+    const names = Object.fromEntries((await c.listAccessPoints()).map((a) => [a.serial, a.name]))
+    expect(names).toMatchObject({ S1: 'B', S2: 'A' })
   })
 
   it('a new name shown before the reboot is not "Done" until the AP really rebooted', async () => {
@@ -175,58 +201,35 @@ describe('runJob', () => {
     item(2, 1, net('10.0.0.13'), { waitsFor: [{ row: 3, reason: 'ip', value: '10.0.0.13' }] }),
     item(3, 2, net('10.0.0.14'))
   ]
-  async function runWith(items, controller, ping) {
-    const job = store.createJob(controllerId, items)
-    const done = runJob(job.id, { store, client: controller, ping })
-    await vi.advanceTimersByTimeAsync(30 * 60_000)
-    await done
-    return { job: store.getJob(job.id), byRow: Object.fromEntries(store.getJobItems(job.id).map((i) => [i.rowNumber, i])) }
-  }
-
-  it('IP chain (A + ping): each AP is sent only after the holder stopped answering on its IP', async () => {
+  it('IP chain: holder first, then the next AP right away — no wait for the holder to reboot', async () => {
     const c = fakeController(APS) // AP leaves Up 5 s after the write
-    const pings = []
-    const { job, byRow } = await runWith(chain(), c, async (ip) => {
-      pings.push(ip)
-      return c.ping(ip)
-    })
+    const { job, byRow } = await run(chain(), c)
     expect(c.writes.map((w) => w.name)).toEqual(['C', 'B', 'A'])
-    for (const k of [1, 2]) {
-      const gap = c.writes[k].at - c.writes[k - 1].at
-      expect(gap).toBeGreaterThanOrEqual(5000) // never before the holder actually went down
-      expect(gap).toBeLessThan(10_000) // ~1 s pings: fast, no full reboot per hop
-    }
-    expect(pings).toContain('10.0.0.13') // pinged C's old IP while B waited
+    expect(c.writes[2].at - c.writes[0].at).toBeLessThan(1000) // all three sent back to back
     expect([1, 2, 3].map((r) => byRow[r].status)).toEqual(['ok', 'ok', 'ok'])
     expect(job.status).toBe('done')
   })
 
-  it('IP chain without ping (AP subnet unreachable): released by the controller showing Rebooting', async () => {
-    const c = fakeController(APS)
-    const { byRow } = await runWith(chain(), c, async () => false) // never answers: ping can't prove anything
-    expect(c.writes.map((w) => w.name)).toEqual(['C', 'B', 'A'])
-    const gap = c.writes[1].at - c.writes[0].at
-    expect(gap).toBeGreaterThanOrEqual(5000)
-    expect(gap).toBeLessThan(12_000) // 3 s controller polls while a chain waits
-    expect([1, 2, 3].map((r) => byRow[r].status)).toEqual(['ok', 'ok', 'ok'])
-  })
-
-  it('IP chain: lost pings (1–2 in a row) on a lossy link do not release the IP', async () => {
-    const c = fakeController(APS, { behavior: (s) => (s === 'S2' ? 'ignore' : 'normal') }) // B never reboots
-    let n = 0
-    const lossy = async (ip) => (++n % 3 === 0 ? false : c.ping(ip)) // every 3rd ping lost
-    const { byRow } = await runWith(chain().slice(0, 2), c, lossy)
-    expect(c.writes.filter((w) => w.name === 'A')).toHaveLength(0)
-    expect(byRow[1].status).toBe('skipped')
-  })
-
-  it('IP chain: a holder the controller accepted but that never reboots blocks its IP — no duplicate', async () => {
-    const c = fakeController(APS, { behavior: (s) => (s === 'S2' ? 'ignore' : 'normal') })
-    const { byRow } = await runWith(chain().slice(0, 2), c, (ip) => c.ping(ip))
-    expect(byRow[2].status).toBe('failed') // B: accepted, never rebooted (resent once, then failed)
-    expect(byRow[1].status).toBe('skipped') // A was never sent: B still holds .12
-    expect(byRow[1].message).toMatch(/Row 2 keeps IP 10\.0\.0\.12/)
-    expect(c.writes.filter((w) => w.name === 'A')).toHaveLength(0)
+  it('long IP shift (100 APs, .11→.12→…): every AP is sent within seconds, not minutes', async () => {
+    const many = Array.from({ length: 100 }, (_, i) =>
+      ap({ name: `AP${i}`, serial: `L${i}`, mac: (0xaabbcc100000 + i).toString(16), ip: `10.0.1.${i + 11}` })
+    )
+    const c = fakeController(many)
+    const items = many.map((a, i) => ({
+      rowNumber: i + 1,
+      serial: a.serial,
+      mac: a.mac,
+      risk: 'high',
+      currentName: a.name,
+      requested: net(`10.0.1.${i + 12}`),
+      changes: [],
+      waitsFor: i < 99 ? [{ row: i + 2, reason: 'ip', value: `10.0.1.${i + 12}` }] : []
+    }))
+    const { byRow } = await run(items, c)
+    expect(c.writes).toHaveLength(100)
+    expect(c.writes[0].name).toBe('AP99') // the end of the chain (holder of nothing) goes first
+    expect(c.writes.at(-1).at - c.writes[0].at).toBeLessThan(5000)
+    expect(Object.values(byRow).every((i) => i.status === 'ok')).toBe(true)
   })
 
   it('IP chain: if the holder write is rejected, the AP that wanted its IP is skipped', async () => {

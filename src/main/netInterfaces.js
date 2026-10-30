@@ -43,6 +43,13 @@ export async function listInterfaces() {
 
 export class SourceInterfaceError extends Error {}
 
+/** The IPv4 address `name` has right now, or null (disconnected / gone). */
+export function currentAddress(name) {
+  const addrs = os.networkInterfaces()[name]
+  const v4 = (addrs || []).find((a) => a.family === 'IPv4' && !a.internal && !a.address.startsWith('169.254.'))
+  return v4 ? v4.address : null
+}
+
 /**
  * The address to bind for the saved interface name, or undefined for "Auto".
  * Throws when the interface is gone or has no IPv4 address right now.
@@ -50,12 +57,35 @@ export class SourceInterfaceError extends Error {}
 export async function resolveSource(name) {
   if (!name) return { localAddress: undefined, label: null }
   await loadMacLabels()
-  const addrs = os.networkInterfaces()[name]
-  const v4 = (addrs || []).find((a) => a.family === 'IPv4' && !a.internal && !a.address.startsWith('169.254.'))
-  if (!v4) {
+  const address = currentAddress(name)
+  if (!address) {
     throw new SourceInterfaceError(
       `The selected source interface ${labelFor(name)} has no IPv4 address (disconnected?). Pick another one in the header, or Auto.`
     )
   }
-  return { localAddress: v4.address, label: labelFor(name) }
+  return { localAddress: address, label: labelFor(name) }
+}
+
+/**
+ * Calls onChange(list) whenever the IPv4 interfaces or their addresses change (Wi-Fi joins
+ * another network, DHCP renews, a cable is pulled). Node has no change event, so this polls;
+ * os.networkInterfaces() is a cheap syscall. Returns a stop function.
+ */
+export function watchInterfaces(onChange, intervalMs = 2000) {
+  let last = null
+  let stopped = false
+  const tick = async () => {
+    const list = await listInterfaces()
+    const key = list.map((i) => `${i.name}=${i.address}/${i.netmask}`).join(',')
+    if (stopped || key === last) return
+    const first = last === null
+    last = key
+    if (!first) onChange(list)
+  }
+  tick()
+  const timer = setInterval(() => tick().catch(() => {}), intervalMs)
+  return () => {
+    stopped = true
+    clearInterval(timer)
+  }
 }

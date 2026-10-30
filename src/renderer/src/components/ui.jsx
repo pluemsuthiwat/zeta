@@ -118,7 +118,8 @@ export function StatBox({ label, value, tone, hint, icon: Icon, iconTone = 'mute
   )
 }
 
-export function Modal({ open, onClose, title, subtitle, width = 'max-w-lg', children, footer, dismissable = true }) {
+/** fullHeight: always as tall as the window allows, so switching to a short list doesn't shrink it. */
+export function Modal({ open, onClose, title, subtitle, width = 'max-w-lg', children, footer, dismissable = true, fullHeight = false }) {
   useEffect(() => {
     if (!open || !dismissable) return
     const onKey = (e) => e.key === 'Escape' && onClose?.()
@@ -128,7 +129,13 @@ export function Modal({ open, onClose, title, subtitle, width = 'max-w-lg', chil
   if (!open) return null
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6 pt-16 backdrop-blur-[3px]">
-      <div className={cx('flex max-h-full w-full flex-col overflow-hidden rounded-2xl border border-line-strong bg-elev shadow-2xl shadow-black/40', width)}>
+      <div
+        className={cx(
+          'flex max-h-full w-full flex-col overflow-hidden rounded-2xl border border-line-strong bg-elev shadow-2xl shadow-black/40',
+          fullHeight && 'h-full',
+          width
+        )}
+      >
         <div className="flex items-start justify-between gap-4 border-b border-line px-5 py-4">
           <div>
             <h2 className="text-[15px] font-semibold text-fg">{title}</h2>

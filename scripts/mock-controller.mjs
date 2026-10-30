@@ -30,7 +30,8 @@ export function makeAps(n) {
       serial: `CNM${String(100000 + k)}`,
       status: k % 17 === 0 ? 'down' : 'up',
       upSince: Date.now() - (k * 97_000),
-      prov: { mode: 'dhcp', ip: '', netmask: '', gateway: '', dns: '', master: '10.20.0.1' }
+      prov: { mode: 'dhcp', ip: '', netmask: '', gateway: '', dns: '', master: '10.20.0.1' },
+      flags: k % 11 === 0 ? '1+2D' : k % 7 === 0 ? 'N2' : '2'
     }
   })
 }
@@ -38,7 +39,6 @@ export function makeAps(n) {
 export function startMockController({ port = 4343, aps = makeAps(60), rebootMs = 20_000, username = 'admin', password = 'admin', ignoreFields = [] } = {}) {
   const sessions = new Map() // token -> { from, lastAt, startedAt }
   let selected = null
-  let hijack = null // { serial, times }: after our staging, "someone else" selects this AP
 
   const fmtUptime = (ms) => {
     const s = Math.floor(ms / 1000)
@@ -101,12 +101,21 @@ export function startMockController({ port = 4343, aps = makeAps(60), rebootMs =
               Group: a.group,
               'AP Type': a.model,
               'IP Address': a.status === 'up' || a.rebootUntil ? a.ip : '0.0.0.0',
-              Flags: '',
+              Flags: a.flags || '',
               'Switch IP': '127.0.0.1',
               'Wired MAC Address': a.mac,
               'Serial #': a.serial
             })),
-            _meta: ['Name', 'Group', 'AP Type', 'IP Address', 'Status', 'Flags', 'Switch IP', 'Wired MAC Address', 'Serial #']
+            _meta: ['Name', 'Group', 'AP Type', 'IP Address', 'Status', 'Flags', 'Switch IP', 'Wired MAC Address', 'Serial #'],
+            // legend as AOS 8.13.3.1 sends it (shortened)
+            _data: [
+              'Flags: 1 = 802.1x authenticated AP use EAP-PEAP;   1+ = 802.1x use EST;    1- = 802.1x use factory cert',
+              '2 = Using IKE version 2;                    4 = WiFi Uplink',
+              'B = Built-in AP;                            C = Cellular RAP;       D = Dirty or no config',
+              'G = No such group;        I = Inactive;     J = USB cert at AP;     L = Unlicensed',
+              'N = Duplicate name;       P = PPPoe AP;     R = Remote AP;          R- = Remote AP requires Auth',
+              String(aps.length)
+            ]
           })
         }
         if (cmd === 'show ap-group') {
@@ -135,10 +144,10 @@ export function startMockController({ port = 4343, aps = makeAps(60), rebootMs =
             ]
           })
         }
-        const m = cmd.match(/^show ap details ap-name (.+)$/)
+        const m = cmd.match(/^show ap details (ap-name|wired-mac) (.+)$/)
         if (m) {
-          const a = aps.find((x) => x.name === m[1])
-          if (!a) return send(res, 200, { _data: [`AP ${m[1]} not found`] })
+          const a = aps.find((x) => (m[1] === 'ap-name' ? x.name === m[2] : x.mac.replace(/:/g, '').toLowerCase() === m[2].replace(/:/g, '').toLowerCase()))
+          if (!a) return send(res, 200, { _data: [`AP ${m[2]} not found`] })
           return send(res, 200, {
             [`AP "${a.name}" Basic Information`]: [{ Item: 'AP IP Address', Value: a.ip }],
             [`AP "${a.name}" Provisioning Parameters`]: [
@@ -165,13 +174,34 @@ export function startMockController({ port = 4343, aps = makeAps(60), rebootMs =
           selected = null
           out.clear_provisioning_ap_list = ok()
         }
+        // As measured on AOS 8.13.3.1: read_bootinfo takes ap-name / ip-addr / wired-mac (no serial;
+        // MAC only as XX:XX:XX:XX:XX:XX), copy_provisioning_params takes ap-name / ip-addr and only
+        // for the AP in the provisioning list, ap_reprovision also takes serial-num.
+        const fail = (status_str) => ({ _result: { status: 1, status_str } })
+        const hexMac = (m) => String(m).replace(/:/g, '').toLowerCase()
         if (json.read_bootinfo) {
-          selected = aps.find((a) => a.name === json.read_bootinfo['ap-name']) || null
-          out.read_bootinfo = selected ? ok() : { _result: { status: 1, status_str: 'AP not found' } }
+          const q = json.read_bootinfo
+          if (q['wired-mac'] !== undefined && !/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(q['wired-mac'])) {
+            out.read_bootinfo = fail('Error : Invalid MAC address. Expected format XX:XX:XX:XX:XX:XX')
+          } else if (!('wired-mac' in q || 'ap-name' in q || 'ip-addr' in q)) {
+            return send(res, 200, { Error: 'Exception raised while processing request' })
+          } else {
+            const found = aps.find((a) =>
+              q['wired-mac'] !== undefined ? hexMac(a.mac) === hexMac(q['wired-mac']) : q['ap-name'] !== undefined ? a.name === q['ap-name'] : a.ip === q['ip-addr']
+            )
+            if (found) selected = found
+            out.read_bootinfo = found ? ok() : fail('AP not found')
+          }
         }
         if (json.copy_provisioning_params) {
-          if (selected) selected.staged = { name: selected.name, group: selected.group, prov: { ...selected.prov } }
-          out.copy_provisioning_params = ok()
+          const q = json.copy_provisioning_params
+          const found = aps.find((a) => (q['ip-addr'] !== undefined ? a.ip === q['ip-addr'] : a.name === q['ap-name']))
+          if (!found) out.copy_provisioning_params = fail(q['ip-addr'] !== undefined ? `AP with IP address ${q['ip-addr']} not found.` : 'AP not found')
+          else if (found !== selected) out.copy_provisioning_params = fail('AP is not in provisioning-ap-list')
+          else {
+            selected.staged = { name: selected.name, group: selected.group, prov: { ...selected.prov } }
+            out.copy_provisioning_params = ok()
+          }
         }
         if (json.ap_prov) {
           if (!selected) out.ap_prov = { _result: { status: 1, status_str: 'No AP selected' } }
@@ -200,14 +230,16 @@ export function startMockController({ port = 4343, aps = makeAps(60), rebootMs =
             stage.prov.mode = stage.prov.ip ? 'static' : 'dhcp'
             selected.pendingApply = { name: stage.name, group: stage.group, prov: stage.prov, ...(stage.prov.ip ? { ip: stage.prov.ip } : {}) }
             out.ap_prov = res
-            if (hijack?.times > 0) {
-              hijack.times--
-              selected = aps.find((a) => a.serial === hijack.serial) || selected
-            }
           }
         }
         if (json.ap_reprovision) {
-          if (selected?.pendingApply) {
+          const q = json.ap_reprovision
+          const target = aps.find((a) => (q['serial-num'] !== undefined ? a.serial === q['serial-num'] : a.name === q['ap-name']))
+          if (!target) {
+            out.ap_reprovision = fail(q['serial-num'] !== undefined ? `AP with serial number ${q['serial-num']} not found.` : 'AP not found')
+            return send(res, 200, out)
+          }
+          if (target === selected && selected.pendingApply) {
             selected.staged = null
             selected.rebootUntil = Date.now() + rebootMs
             if (selected.pendingApply.prov.master !== '10.20.0.1') {
@@ -224,8 +256,6 @@ export function startMockController({ port = 4343, aps = makeAps(60), rebootMs =
     })
   })
   const hooks = {
-    /** Simulate another session selecting a different AP in the shared provisioning list. */
-    hijackAfterStaging: (serial, times = 1) => { hijack = { serial, times } },
     sessionCount: () => sessions.size
   }
   return new Promise((resolve) => server.listen(port, '127.0.0.1', () => resolve({ server, aps, port: server.address().port, ...hooks })))

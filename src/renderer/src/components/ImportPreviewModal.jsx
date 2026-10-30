@@ -122,7 +122,7 @@ function UploadAndReview({ controller, onClose, onJobStarted }) {
         </div>
         <div className="text-xs leading-relaxed text-subtle">
           <p>
-            One row per AP, identified by <b>Serial Number</b> (or MAC). Other columns are the new values; an empty cell means
+            One row per AP, identified by <b>Serial Number</b> (required). The MAC Address column is for your records only; Zeta doesn't use or check it. Other columns are the new values; an empty cell means
             “don't change it”. Columns: Name, Group, IP (or <span className="mono">DHCP</span>), Netmask, Gateway, DNS, Master.
           </p>
           <p className="mt-1">.xlsx only, up to 2 MB and 2,000 rows. Only the first worksheet is read; row 1 is the header.</p>
@@ -276,6 +276,7 @@ function ReviewStep({ controller, file, preview, onBack, onClose, onJobStarted }
       onClose={onClose}
       dismissable={!applying}
       width="max-w-6xl"
+      fullHeight
       title="Review changes"
       subtitle={`${file.name} · ${controller.name}`}
       footer={
@@ -283,7 +284,20 @@ function ReviewStep({ controller, file, preview, onBack, onClose, onJobStarted }
           <div className="text-sm text-muted">
             <b className="text-fg">{applicable}</b> will be applied · {summary.errors} skipped · {summary.noChange} unchanged
           </div>
-          <div className="ml-auto flex gap-2">
+          <div className="ml-auto flex items-center gap-2">
+            {/* in the footer so it stays put whatever the list length */}
+            {applicable > 0 && (
+              <label className="mr-1 flex cursor-pointer items-center gap-2 rounded-lg border border-warn/30 bg-warn/8 px-3 py-1.5 text-[13px] font-medium text-warn">
+                <input
+                  type="checkbox"
+                  className="size-4 accent-[var(--warn)]"
+                  checked={confirmed}
+                  disabled={applying}
+                  onChange={(e) => setConfirmed(e.target.checked)}
+                />
+                I understand every applied AP will reboot (a few minutes each)
+              </label>
+            )}
             <Button onClick={onBack} disabled={applying}>
               Upload another file
             </Button>
@@ -300,6 +314,12 @@ function ReviewStep({ controller, file, preview, onBack, onClose, onJobStarted }
             ? 'Preview only. Nothing has been changed on the controller yet.'
             : 'Preview only. Nothing in this file can be applied: fix the rows below and upload the file again.'}
         </Alert>
+        {applicable > 0 && summary.highRisk > 0 && (
+          <Alert tone="yellow" icon={AlertTriangle}>
+            <b>{plural(summary.highRisk, 'AP')}</b> will change Static IP, DHCP or Master. A wrong value can make an AP unreachable, and all
+            rows are sent in one go. Consider trying 1–2 APs first.
+          </Alert>
+        )}
 
         <div className={cx('grid gap-3', summary.notUp ? 'grid-cols-5' : 'grid-cols-4')}>
           {ROW_FILTERS.filter((f) => f.key !== 'notup' || summary.notUp).map((f) => (
@@ -322,9 +342,9 @@ function ReviewStep({ controller, file, preview, onBack, onClose, onJobStarted }
         {summary.otherSessions?.length > 0 && (
           <Alert tone="yellow" icon={AlertTriangle} title="Someone else is active on this controller">
             {summary.otherSessions.map((x) => `${x.user || 'user'} from ${x.from}`).join(', ')}{' '}
-            {summary.otherSessions.length === 1 ? 'has' : 'have'} been active in the last 2 minutes. If they are provisioning APs too (another Zeta or
-            the WebUI), Zeta checks before every reboot that the controller's shared provisioning list still holds its own AP and stops that AP
-            otherwise — but it is safest to agree who provisions first.
+            {summary.otherSessions.length === 1 ? 'has' : 'have'} been active in the last 2 minutes. The controller's provisioning list is shared
+            by every session, so if they provision APs at the same time (another Zeta or the WebUI) an AP can get the wrong values. Agree who
+            provisions first.
           </Alert>
         )}
         {summary.unreadable > 0 && (
@@ -373,23 +393,6 @@ function ReviewStep({ controller, file, preview, onBack, onClose, onJobStarted }
           </Alert>
         )}
 
-        {applicable > 0 && (
-          <div className="space-y-2 rounded-xl border border-warn/30 bg-warn/8 px-4 py-3">
-            {summary.highRisk > 0 && (
-              <div className="flex gap-2 text-sm text-warn">
-                <AlertTriangle className="mt-0.5 size-4 shrink-0" />
-                <span>
-                  <b>{plural(summary.highRisk, 'AP')}</b> will change Static IP, DHCP or Master. A wrong value can make an AP unreachable, and
-                  all rows are sent in one go. Consider trying 1–2 APs first.
-                </span>
-              </div>
-            )}
-            <label className="flex cursor-pointer items-center gap-2 text-sm font-medium text-warn">
-              <input type="checkbox" className="size-4 accent-[var(--warn)]" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} />
-              I understand every applied AP will reboot (a few minutes each)
-            </label>
-          </div>
-        )}
       </div>
     </Modal>
   )
@@ -444,7 +447,7 @@ function ReviewRow({ row: r }) {
               ?.filter((d) => d.reason === 'ip')
               .map((d) => (
                 <div key={d.row} className="text-xs text-subtle">
-                  sent after row {d.row} leaves {d.value}
+                  row {d.row} moves off {d.value} (sent first)
                 </div>
               ))}
             {by.master && (
@@ -540,6 +543,7 @@ function ProgressStep({ controller, jobId, onClose }) {
       open
       onClose={onClose}
       width="max-w-6xl"
+      fullHeight
       title="Provisioning progress"
       subtitle={controller.name}
       footer={<Button onClick={onClose}>{running ? 'Close (keeps running)' : 'Close'}</Button>}
@@ -640,6 +644,13 @@ function ProgressStep({ controller, jobId, onClose }) {
                     </tr>
                   )
                 })}
+                {shown.length === 0 && (
+                  <tr>
+                    <td colSpan={4} className="px-3 py-8 text-center text-subtle">
+                      No APs here.
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>

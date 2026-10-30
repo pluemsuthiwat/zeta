@@ -37,7 +37,13 @@ contextBridge.exposeInMainWorld('zeta', {
   },
   net: {
     list: () => invoke('net:list'),
-    set: (name) => invoke('net:set', name)
+    set: (name) => invoke('net:set', name),
+    /** Interfaces or addresses changed: ({ selected, interfaces }) => void. Returns unsubscribe. */
+    onChange: (cb) => {
+      const listener = (_e, data) => cb(data)
+      ipcRenderer.on('net:changed', listener)
+      return () => ipcRenderer.removeListener('net:changed', listener)
+    }
   },
   jobs: {
     list: (id) => invoke('jobs:list', id),

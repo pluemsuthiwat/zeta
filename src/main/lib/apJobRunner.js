@@ -1,18 +1,11 @@
-// Runs one provisioning job to the end in the main process. Writes are pipelined (one AP every
-// 1.5 s, not waiting for reboots) and success is decided by what the controller shows afterwards,
+// Runs one provisioning job to the end in the main process. Writes are pipelined (one AP right
+// after the other, not waiting for reboots) and success is decided by what the controller shows afterwards,
 // never by the write call's own "status 0".
 
 export const DEFAULT_TIMINGS = {
-  writeGapMs: 1500,
+  // Next AP as soon as the previous write returns (each takes ~0.2-0.5 s on the controller).
+  writeGapMs: 0,
   pollMs: 10_000,
-  // IP chains (A + ping): while a row waits for the AP holding its IP to let go of it, read the
-  // AP list this often and ping the holder's old IP every pingMs. Only an AP that answered ping
-  // before can be released by ping, and only after `pingMisses` misses in a row (3, so one or two
-  // lost packets on a lossy link don't count). If the AP never answers (this computer can't reach
-  // the AP subnet), ping proves nothing and the controller showing Rebooting/Down releases it.
-  chainPollMs: 3000,
-  pingMs: 1000,
-  pingMisses: 3,
   noRebootMs: 90_000,
   verifyTimeoutMs: 8 * 60_000,
   // After a reboot the AP shows its new values as soon as it is Up again; if it stays Up with
@@ -25,13 +18,11 @@ export const DEFAULT_TIMINGS = {
 const TERMINAL = new Set(['ok', 'sent', 'failed', 'skipped'])
 const sleepReal = (ms) => new Promise((r) => setTimeout(r, ms))
 
+/** APs are identified by Serial Number only. */
 function findAp(aps, item) {
-  if (item.serial) {
-    const s = item.serial.toLowerCase()
-    const ap = aps.find((a) => a.serial && a.serial.toLowerCase() === s)
-    if (ap) return ap
-  }
-  return item.mac ? aps.find((a) => a.mac === item.mac) || null : null
+  if (!item.serial) return null
+  const s = item.serial.toLowerCase()
+  return aps.find((a) => a.serial && a.serial.toLowerCase() === s) || null
 }
 
 const snapshot = (ap) => ({ name: ap.name, group: ap.group, ip: ap.ip })
@@ -68,8 +59,7 @@ export async function runJob(jobId, deps) {
 
   const items = store.getJobItems(jobId)
   const byRow = new Map(items.map((i) => [i.rowNumber, i]))
-  const extra = new Map(items.map((i) => [i.id, { sentAt: 0, seenDown: false, pingSeen: false, pingMiss: 0, pingGone: false, pingAt: 0 }]))
-  const ping = deps.ping || null // async (ip) => boolean: does it answer right now
+  const extra = new Map(items.map((i) => [i.id, { sentAt: 0, seenDown: false }]))
 
   const set = (item, patch) => {
     Object.assign(item, patch)
@@ -92,7 +82,10 @@ export async function runJob(jobId, deps) {
       if (!ap) set(item, { status: 'failed', message: 'The AP is no longer on this controller. Nothing was written.' })
       else if (ap.status !== 'up')
         set(item, { status: 'skipped', message: `The AP was ${ap.status} when the job started. Nothing was written.` })
-      else set(item, { before: snapshot(ap), currentName: ap.name })
+      else {
+        set(item, { before: snapshot(ap), currentName: ap.name })
+        extra.get(item.id).ap = ap // serial / MAC / IP used to address it on the controller
+      }
     }
     notify()
 
@@ -101,53 +94,13 @@ export async function runJob(jobId, deps) {
       .filter((i) => i.status === 'pending')
       .sort((a, b) => (a.risk === b.risk ? a.rowNumber - b.rowNumber : a.risk === 'low' ? -1 : 1))
 
-    // Chains (.10→.11 while .11→.12): the holder is always written first.
-    //  - name: the next row goes once the controller accepted the holder's write (the controller
-    //    tolerates a duplicate name for the seconds until the reboot).
-    //  - IP (A + ping): the next row goes only once the holder has really let go of the address —
-    //    the controller shows it Rebooting/Down, or its old IP stopped answering ping — so two APs
-    //    never come up on one IP, even if the controller accepted a holder that never reboots.
-    // A holder that fails or is skipped skips every row waiting on it.
-    const leftIp = (d) => {
-      const x = extra.get(d.id)
-      return x.seenDown || x.pingGone
-    }
+    // Chains (.10→.11 while .11→.12, names or IPs): the holder is always written first, and the
+    // next row goes as soon as the controller accepted the holder's write — nothing waits for
+    // reboots (the import already checked that the end state is unique). If the holder's write
+    // fails or it is skipped, it keeps its value, so every row waiting on it is skipped.
     const released = (dep) => {
       const d = byRow.get(dep.row)
-      if (!d) return true
-      if (d.status === 'ok' || d.status === 'sent') return true
-      if (d.status !== 'verifying') return false
-      return dep.reason === 'ip' ? leftIp(d) : true
-    }
-    /** Holders that rows are waiting on to leave their IP. */
-    const ipHolders = () => {
-      const out = new Set()
-      for (const i of items) {
-        if (i.status !== 'pending') continue
-        for (const dep of i.waitsFor || []) {
-          const d = byRow.get(dep.row)
-          if (dep.reason === 'ip' && d?.status === 'verifying' && !leftIp(d)) out.add(d)
-        }
-      }
-      return [...out]
-    }
-    const pingHolders = async (holders) => {
-      if (!ping) return
-      const due = holders.filter((d) => now() - extra.get(d.id).pingAt >= t.pingMs && d.before?.ip)
-      await Promise.all(
-        due.map(async (d) => {
-          const x = extra.get(d.id)
-          x.pingAt = now()
-          const alive = await ping(d.before.ip).catch(() => true)
-          if (alive) {
-            x.pingSeen = true
-            x.pingMiss = 0
-          } else if (x.pingSeen && ++x.pingMiss >= t.pingMisses) {
-            x.pingGone = true
-            log('ip-released', { row: d.rowNumber, ip: d.before.ip, by: 'ping' })
-          }
-        })
-      )
+      return !d || ['verifying', 'ok', 'sent'].includes(d.status)
     }
     const pickNext = () => {
       for (const item of queue) {
@@ -162,12 +115,7 @@ export async function runJob(jobId, deps) {
           })
           continue
         }
-        if (blocking.length) {
-          const ipDep = blocking.find((dep) => dep.reason === 'ip')
-          const msg = ipDep ? `Waiting for row ${ipDep.row} to leave IP ${ipDep.value} (rebooting) before sending this AP.` : null
-          if (msg && item.message !== msg) set(item, { message: msg })
-          continue
-        }
+        if (blocking.length) continue
         return item
       }
       return null
@@ -178,14 +126,16 @@ export async function runJob(jobId, deps) {
       notify()
       log('write', { row: item.rowNumber, serial: item.serial, name: item.currentName, attempt: item.attempts, requested: item.requested })
       try {
-        await client.provision({ name: item.currentName, serial: item.serial, mac: item.mac }, item.requested)
+        const ap = extra.get(item.id).ap
+        await client.provision({ serial: ap.serial, mac: ap.mac, ip: ap.ip, name: ap.name }, item.requested)
         log('write-ok', { row: item.rowNumber })
       } catch (err) {
         log('write-error', { row: item.rowNumber, error: err.message, code: err.code })
         set(item, {
           status: 'failed',
-          message:
-            err.code === 'EREJECTED' || err.code === 'ECONFLICT'
+          message: err.beforeReboot
+            ? `${err.message.replace(/\.?$/, '.')} The AP was not rebooted and nothing changed.`
+            : err.code === 'EREJECTED'
               ? err.message
               : `${err.message} The command may or may not have reached the AP; check it on the controller.`
         })
@@ -325,14 +275,9 @@ export async function runJob(jobId, deps) {
         break
       }
       const verifying = items.some((i) => i.status === 'verifying')
-      const holders = ipHolders()
-      if (holders.length) {
-        await pingHolders(holders)
-        nextPollAt = Math.min(nextPollAt, now() + t.chainPollMs)
-      }
       if (verifying && now() >= nextPollAt) {
         await verify()
-        nextPollAt = now() + (ipHolders().length ? t.chainPollMs : t.pollMs)
+        nextPollAt = now() + t.pollMs
         notify()
       }
       let wrote = false
@@ -358,8 +303,7 @@ export async function runJob(jobId, deps) {
       const hasPending = items.some((i) => i.status === 'pending')
       const wake = Math.min(
         hasPending ? nextWriteAt : Infinity,
-        items.some((i) => i.status === 'verifying') ? nextPollAt : Infinity,
-        holders.length && ping ? now() + t.pingMs : Infinity
+        items.some((i) => i.status === 'verifying') ? nextPollAt : Infinity
       )
       await sleep(Math.max(50, Math.min(wake - now(), t.pollMs)))
     }

@@ -59,19 +59,23 @@ const matchesAny = (row, prov) =>
  * Full preview: parse file, read AP list, validate, read provisioning where needed, prune.
  * @param {object} [opts]
  * @param {(p: {phase: string, done: number, total: number}) => void} [opts.onProgress]
+ * @param {object[]} [opts.inFlight] names/IPs running jobs are about to set (see resolveDependencies)
  * @param {Map<string, object>} [opts.known] provisioning read by a recent preview of the same
  *   file (serial → result). Apply passes it: a value that "differs" is written either way, so it
  *   is reused; anything that matched (and would be skipped) is read again, because only a stale
  *   "matches" can wrongly skip a change.
  * @returns {{ rows, aps, summary, provisioning: Map<string, object> }}
  */
-export async function runLivePreview(client, fileBuffer, { onProgress = () => {}, known = null } = {}) {
+export async function runLivePreview(client, fileBuffer, { onProgress = () => {}, known = null, inFlight = [] } = {}) {
   const parsed = await readWorkbook(fileBuffer)
   onProgress({ phase: 'list', done: 0, total: 0 })
   const aps = await client.listAccessPoints()
-  const rows = validateRows(parsed.rows, aps)
+  const rows = validateRows(parsed.rows, aps, inFlight)
 
-  const needDetails = rows.filter((r) => r.errors.length === 0 && (r.requested.network || r.requested.master))
+  // Rows blocked only by a name/IP holder are read too: if the AP already has the value, the
+  // claim (and its error) goes away when the chains are rechecked below.
+  const ownErrors = (r) => r.errors.filter((e) => !(r.depErrors || []).includes(e)).length
+  const needDetails = rows.filter((r) => ownErrors(r) === 0 && (r.requested.network || r.requested.master))
   const toRead = []
   for (const row of needDetails) {
     const prev = known?.get(row.ap.serial)
@@ -84,7 +88,7 @@ export async function runLivePreview(client, fileBuffer, { onProgress = () => {}
   onProgress({ phase: 'details', done, total: toRead.length })
   await mapLimit(toRead, DETAIL_CONCURRENCY, async (row) => {
     try {
-      row.provisioning = await client.getProvisioning(row.ap.name)
+      row.provisioning = await client.getProvisioning(row.ap)
     } catch {
       row.provisioning = null
     }
@@ -106,7 +110,7 @@ export async function runLivePreview(client, fileBuffer, { onProgress = () => {}
   // The controller accepts a group that doesn't exist (status 0) and the AP reboots into it,
   // so check every requested group against `show ap-group`. With a Master change the group
   // must exist on the *new* controller, which this one can't tell us: warn instead.
-  const wantGroups = rows.filter((r) => !r.errors.length && r.requested.group)
+  const wantGroups = rows.filter((r) => !ownErrors(r) && r.requested.group)
   if (wantGroups.length && typeof client.listApGroups === 'function') {
     const groups = await client.listApGroups()
     const exact = new Set(groups)
@@ -126,7 +130,7 @@ export async function runLivePreview(client, fileBuffer, { onProgress = () => {}
   }
 
   // Dropping values the AP already has can change who moves off what: recheck the chains.
-  resolveDependencies(rows, aps)
+  resolveDependencies(rows, aps, inFlight)
 
   for (const r of rows) {
     if (r.errors.length) r.status = 'error'
@@ -144,8 +148,12 @@ export function summarize(rows, unreadable = 0) {
   const reasons = new Map()
   for (const r of rows) {
     for (const e of r.errors) {
-      // group "same reason, different value": hide quoted values and tokens that contain digits
-      const key = e.replace(/"[^"]*"/g, '"…"').replace(/[\w:.\-/]*\d(?:[\w:.\-/]*\w)?/g, '…')
+      // group "same reason, different value": hide quoted values, tokens that contain digits, and
+      // all-caps tokens of 6+ characters (serials can be letters only: CNSDJKLZMT)
+      const key = e
+        .replace(/"[^"]*"/g, '"…"')
+        .replace(/\b[A-Z][A-Z0-9]{5,}\b/g, '…')
+        .replace(/[\w:.\-/]*\d(?:[\w:.\-/]*\w)?/g, '…')
       reasons.set(key, (reasons.get(key) || 0) + 1)
     }
   }
