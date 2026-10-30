@@ -2,6 +2,7 @@
 // Rows that break a rule become errors and are skipped; other rows carry on.
 import ExcelJS from 'exceljs'
 import { isIpv4, isValidNetmask, staticSetErrors } from './ipv4.js'
+import { normalizeMac, formatMac } from './macAddress.js'
 
 export const MAX_ROWS = 2000
 export const MAX_BYTES = 2 * 1024 * 1024
@@ -10,6 +11,7 @@ export class ImportFileError extends Error {}
 
 const HEADER_ALIASES = {
   serial: ['serial', 'serial number', 'serial #', 'sn', 's/n'],
+  mac: ['mac', 'mac address', 'ethernet mac', 'wired mac'],
   name: ['name', 'new name'],
   group: ['group', 'new group'],
   ip: ['ip', 'ip address', 'new ip'],
@@ -55,7 +57,7 @@ export async function readWorkbook(buffer) {
     const key = headerKey(cellText(cell))
     if (key && columns[key] === undefined) columns[key] = col
   })
-  // APs are identified by Serial Number only (a MAC column, if any, is ignored)
+  // APs are identified by Serial Number only (a MAC column is only compared, as a warning)
   if (columns.serial === undefined) {
     throw new ImportFileError('The first row needs a Serial Number column.')
   }
@@ -105,6 +107,22 @@ export function validateRows(parsedRows, aps, inFlight = []) {
       if (!ap) errors.push(`No AP with Serial Number ${v.serial} was found on this controller.`)
     }
 
+    // --- MAC: the user's record only. Compared with the AP found by serial, never used to provision ---
+    let macMismatch = false
+    if (v.mac && ap) {
+      const mac = normalizeMac(v.mac)
+      const apMac = normalizeMac(ap.mac)
+      if (!mac) {
+        macMismatch = true
+        warnings.push(`MAC "${v.mac}" in the file is not a valid MAC address. Zeta goes by Serial Number, so the row still applies.`)
+      } else if (apMac && mac !== apMac) {
+        macMismatch = true
+        warnings.push(
+          `MAC ${formatMac(mac)} in the file does not match ${formatMac(apMac)} on the controller for Serial ${ap.serial}. Zeta goes by Serial Number, so the row still applies.`
+        )
+      }
+    }
+
     const requested = {}
 
     // --- name / group ---
@@ -148,7 +166,7 @@ export function validateRows(parsedRows, aps, inFlight = []) {
       warnings.push(`The AP is ${ap.status} right now. It will be skipped if it is still not Up when the job starts.`)
     }
 
-    return { rowNumber, excelRow, input: v, ap, errors, warnings, requested, waitsFor: [] }
+    return { rowNumber, excelRow, input: v, ap, errors, warnings, macMismatch, requested, waitsFor: [] }
   })
 
   // --- the same AP referenced by more than one row ---

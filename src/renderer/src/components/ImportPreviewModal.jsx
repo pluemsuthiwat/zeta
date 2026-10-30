@@ -122,7 +122,7 @@ function UploadAndReview({ controller, onClose, onJobStarted }) {
         </div>
         <div className="text-xs leading-relaxed text-subtle">
           <p>
-            One row per AP, identified by <b>Serial Number</b> (required). The MAC Address column is for your records only; Zeta doesn't use or check it. Other columns are the new values; an empty cell means
+            One row per AP, identified by <b>Serial Number</b> (required). The MAC Address column is for your records: Zeta only warns when it doesn't match the AP with that serial, and never uses it to provision. Other columns are the new values; an empty cell means
             “don't change it”. Columns: Name, Group, IP (or <span className="mono">DHCP</span>), Netmask, Gateway, DNS, Master.
           </p>
           <p className="mt-1">.xlsx only, up to 2 MB and 2,000 rows. Only the first worksheet is read; row 1 is the header.</p>
@@ -229,7 +229,9 @@ const ROW_FILTERS = [
   { key: 'ready', label: 'Ready to apply', match: (r) => r.status === 'ready', tone: 'text-ok' },
   { key: 'notup', label: 'Not Up', match: (r) => r.status === 'notup', tone: 'text-warn' },
   { key: 'nochange', label: 'No change', match: (r) => r.status === 'nochange' },
-  { key: 'error', label: 'Errors', match: (r) => r.status === 'error', tone: 'text-bad' }
+  { key: 'error', label: 'Errors', match: (r) => r.status === 'error', tone: 'text-bad' },
+  // no tile: opened from the MAC alert
+  { key: 'mac', label: 'MAC differs', match: (r) => r.macMismatch, tile: false }
 ]
 
 function ReviewStep({ controller, file, preview, onBack, onClose, onJobStarted }) {
@@ -322,7 +324,7 @@ function ReviewStep({ controller, file, preview, onBack, onClose, onJobStarted }
         )}
 
         <div className={cx('grid gap-3', summary.notUp ? 'grid-cols-5' : 'grid-cols-4')}>
-          {ROW_FILTERS.filter((f) => f.key !== 'notup' || summary.notUp).map((f) => (
+          {ROW_FILTERS.filter((f) => f.tile !== false && (f.key !== 'notup' || summary.notUp)).map((f) => (
             <FilterTile key={f.key} label={f.label} count={counts[f.key]} tone={f.tone} active={filter === f.key} onClick={() => setFilter(f.key)} />
           ))}
         </div>
@@ -351,6 +353,16 @@ function ReviewStep({ controller, file, preview, onBack, onClose, onJobStarted }
           <Alert tone="gray" icon={Info}>
             {plural(summary.unreadable, 'AP')} could not be read from the controller. Their network/master values are treated as changes,
             so they may reboot even if the values already match.
+          </Alert>
+        )}
+        {summary.macMismatch > 0 && (
+          <Alert tone="yellow" icon={AlertTriangle}>
+            <b>{plural(summary.macMismatch, 'row')}</b> {summary.macMismatch === 1 ? 'has a MAC that does' : 'have a MAC that does'} not match
+            the AP found by Serial Number (or is not a valid MAC). Provisioning goes by Serial Number only, so this does not change what is
+            applied. Fix the MAC in your file if you keep it as a record.{' '}
+            <button type="button" className="font-medium underline underline-offset-2" onClick={() => setFilter('mac')}>
+              Show {summary.macMismatch === 1 ? 'it' : 'them'}
+            </button>
           </Alert>
         )}
 

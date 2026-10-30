@@ -164,6 +164,7 @@ export function summarize(rows, unreadable = 0) {
     noChange: count('nochange'),
     errors: count('error'),
     highRisk: rows.filter((r) => (r.status === 'ready' || r.status === 'notup') && r.risk === 'high').length,
+    macMismatch: rows.filter((r) => r.macMismatch).length,
     unreadable,
     topErrors: [...reasons.entries()]
       .sort((a, b) => b[1] - a[1])
@@ -186,6 +187,7 @@ export function toPreviewRow(r) {
     risk: r.risk,
     errors: r.errors,
     warnings: r.warnings,
+    macMismatch: Boolean(r.macMismatch),
     changes: r.changes,
     waitsFor: r.waitsFor
   }

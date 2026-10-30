@@ -39,12 +39,13 @@ describe('readWorkbook', () => {
     const { rows } = await readWorkbook(await buildTemplate('static'))
     expect(rows[0].values).toMatchObject({ serial: 'ABC123456', ip: '192.168.1.50', dns: '8.8.8.8' })
   })
-  it('templates keep the MAC Address column (for the user\'s records; import ignores it)', async () => {
+  it('templates keep the MAC Address column (for the user\'s records; only compared, as a warning)', async () => {
     const { columns, rows } = await readWorkbook(await buildTemplate('static'))
-    expect(columns[0]).toBe('serial')
-    expect(rows[0].values.mac).toBeUndefined()
+    expect(columns.slice(0, 2)).toEqual(['serial', 'mac'])
+    expect(rows[0].values.mac).toBe('AA:BB:CC:DD:EE:FF')
     const [r] = validateRows(rows.map((x) => ({ ...x, values: { ...x.values, serial: 'S1' } })), APS)
     expect(r.errors).toEqual([])
+    expect(r.macMismatch).toBe(true)
   })
 })
 
@@ -54,12 +55,26 @@ describe('validateRows: identifying the AP (Serial Number only)', () => {
     expect(r.status).toBe('ready')
     expect(r.ap.name).toBe('A')
   })
-  it('a row without a serial is an error, even with a MAC; a MAC column is ignored', async () => {
+  it('a row without a serial is an error, even with a MAC; a MAC never picks the AP', async () => {
     const r = await check(['Serial', 'MAC', 'Name'], [['', 'aabbcc000002', 'B2'], ['S1', 'aabbcc000002', 'A2']])
     expect(r[0].status).toBe('error')
     expect(r[0].errors).toEqual(['The row has no Serial Number.'])
     expect(r[1].status).toBe('ready')
     expect(r[1].ap.name).toBe('A')
+  })
+  it('warns when the MAC differs from the AP found by serial, but still applies the row', async () => {
+    const r = await check(['Serial', 'MAC Address', 'Name'], [['S1', 'AA-BB-CC-00-00-02', 'A2'], ['S2', 'zz:zz', 'B2']])
+    expect(r[0].status).toBe('ready')
+    expect(r[0].errors).toEqual([])
+    expect(r[0].macMismatch).toBe(true)
+    expect(r[0].warnings[0]).toMatch(/aa:bb:cc:00:00:02 in the file does not match aa:bb:cc:00:00:01 on the controller for Serial S1/)
+    expect(r[0].requested).toEqual({ name: 'A2' })
+    expect(r[1].status).toBe('ready')
+    expect(r[1].warnings[0]).toMatch(/"zz:zz" in the file is not a valid MAC/)
+  })
+  it('no MAC warning when it matches in any format, or the cell is empty', async () => {
+    const r = await check(['Serial', 'MAC', 'Name'], [['S1', 'AABB.CC00.0001', 'A2'], ['S2', '', 'B2']])
+    expect(r.map((x) => [x.macMismatch, x.warnings])).toEqual([[false, []], [false, []]])
   })
   it('errors on an unknown serial', async () => {
     const [r] = await check(['Serial', 'Name'], [['NOPE', 'y']])
