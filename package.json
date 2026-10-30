@@ -1,7 +1,7 @@
 {
   "name": "zeta",
   "productName": "Zeta",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Bulk-provision Aruba access points from Excel",
   "main": "out/main/index.js",
   "author": "Suthiwat Srisen",

@@ -12,6 +12,13 @@ mac:
     - target: dmg
       arch: [arm64, x64]
   category: public.app-category.utilities
+  # Ad-hoc sign the whole bundle as com.suthiwat.zeta with Info.plist bound. Unsigned builds keep
+  # the linker's "Electron" identity, so macOS never matches the Local Network permission to the
+  # app and connections to the controller fail with EHOSTUNREACH even when the toggle is on.
+  identity: '-'
+  hardenedRuntime: false # with an ad-hoc signature, library validation would refuse Electron's frameworks
+  extendInfo:
+    NSLocalNetworkUsageDescription: Zeta connects to Aruba controllers on your local network to provision access points.
 win:
   target:
     - target: nsis
