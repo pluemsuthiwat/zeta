@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { ChevronRight, ExternalLink, RefreshCw } from 'lucide-react'
+import { ArrowDownToLine, ChevronRight, ExternalLink, RefreshCw } from 'lucide-react'
 import { api } from '../api.js'
 import logo from '../assets/logo.svg'
 import zetaLicense from '../../../../LICENSE?raw'
@@ -16,20 +16,22 @@ function LicenseText({ children }) {
 }
 
 /** Version, Zeta's own license, and the license of every package that ships inside the app. */
-export default function AboutDialog({ open, onClose }) {
+/** update/onUpdate: the shared result of useUpdateCheck; "Check for updates" refreshes it. */
+export default function AboutDialog({ open, onClose, update, onUpdate }) {
   const [about, setAbout] = useState(null)
   const [error, setError] = useState('')
   const [query, setQuery] = useState('')
   const [expanded, setExpanded] = useState(null) // 'zeta' or name@version
   const toggle = (key) => setExpanded((k) => (k === key ? null : key))
-  const [update, setUpdate] = useState({ state: 'idle' }) // idle | checking | done | error
+  const [check, setCheck] = useState({ state: 'idle' }) // idle | checking | done | error
 
   async function checkUpdate() {
-    setUpdate({ state: 'checking' })
+    setCheck({ state: 'checking' })
     try {
-      setUpdate({ state: 'done', ...(await api.app.checkUpdate(true)) })
+      onUpdate(await api.app.checkUpdate(true))
+      setCheck({ state: 'done' })
     } catch (err) {
-      setUpdate({ state: 'error', error: err.message })
+      setCheck({ state: 'error', error: err.message })
     }
   }
 
@@ -46,6 +48,28 @@ export default function AboutDialog({ open, onClose }) {
 
   return (
     <Modal open={open} onClose={onClose} title="About Zeta" width="max-w-2xl" fullHeight footer={<Button onClick={onClose}>Close</Button>}>
+      {update?.available && (
+        <div className="mb-5 flex items-center gap-3 rounded-xl border border-accent/30 bg-accent/10 px-4 py-3">
+          <ArrowDownToLine className="size-5 shrink-0 text-accent" />
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-semibold text-fg">Zeta {update.latest} is available</div>
+            <div className="text-[13px] text-muted">
+              You have {update.current}. Download it, quit Zeta and install it over this one. Your controllers and jobs are kept.
+            </div>
+          </div>
+          <a href={update.releaseUrl} target="_blank" rel="noreferrer" className="shrink-0 rounded-md px-2 py-1 text-[13px] text-muted hover:bg-hover hover:text-fg">
+            What's new
+          </a>
+          <a
+            href={update.downloadUrl || update.releaseUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="shrink-0 rounded-lg bg-accent px-3.5 py-1.5 text-[13px] font-medium text-white transition-colors hover:bg-accent-2"
+          >
+            Download
+          </a>
+        </div>
+      )}
       <div className="flex items-center gap-4">
         <img src={logo} alt="" className="size-14 rounded-2xl" />
         <div className="min-w-0 flex-1">
@@ -73,23 +97,12 @@ export default function AboutDialog({ open, onClose }) {
       )}
 
       <div className="mt-3 flex flex-wrap items-center gap-3">
-        <Button size="sm" icon={RefreshCw} busy={update.state === 'checking'} onClick={checkUpdate}>
+        <Button size="sm" icon={RefreshCw} busy={check.state === 'checking'} onClick={checkUpdate}>
           Check for updates
         </Button>
-        {update.state === 'done' && !update.available && <span className="text-[13px] text-ok">Zeta is up to date.</span>}
-        {update.state === 'done' && update.available && (
-          <span className="text-[13px] text-fg">
-            Zeta {update.latest} is available.{' '}
-            <a href={update.downloadUrl || update.releaseUrl} target="_blank" rel="noreferrer" className="font-medium text-accent hover:underline">
-              Download
-            </a>
-            {' · '}
-            <a href={update.releaseUrl} target="_blank" rel="noreferrer" className="text-accent hover:underline">
-              What's new
-            </a>
-          </span>
-        )}
-        {update.state === 'error' && <span className="text-[13px] text-bad">Couldn't check: {update.error}</span>}
+        {check.state === 'done' && !update?.available && <span className="text-[13px] text-ok">Zeta is up to date.</span>}
+        {check.state === 'done' && update?.available && <span className="text-[13px] text-subtle">A newer version is available (see above).</span>}
+        {check.state === 'error' && <span className="text-[13px] text-bad">Couldn't check: {check.error}</span>}
       </div>
 
       <div className="mt-4">
