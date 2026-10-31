@@ -2,6 +2,12 @@ import { useState } from 'react'
 import { api } from '../api.js'
 import { Modal, Button, Field, inputClass, Alert } from './ui.jsx'
 import { AlertCircle } from 'lucide-react'
+import Dropdown from './Dropdown.jsx'
+
+const MODES = [
+  { value: 'standalone', label: 'Standalone' },
+  { value: 'managed', label: 'Managed by MM' }
+]
 
 const EMPTY = { name: '', ipAddress: '', port: '4343', mode: 'standalone', configNodePath: '', username: '', password: '' }
 
@@ -68,11 +74,8 @@ export default function ControllerForm({ open, controller, onClose, onSaved }) {
             />
           </Field>
         </div>
-        <Field label="Mode" required>
-          <select className={inputClass} value={form.mode} onChange={set('mode')}>
-            <option value="standalone">Standalone</option>
-            <option value="managed">Managed by MM</option>
-          </select>
+        <Field as="div" label="Mode" required>
+          <Dropdown options={MODES} value={form.mode} onChange={(mode) => setForm((f) => ({ ...f, mode }))} ariaLabel="Mode" />
         </Field>
         <Field
           label="Config Node Path"

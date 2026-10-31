@@ -13,6 +13,8 @@ mac:
     - target: dmg
       arch: [arm64, x64]
   category: public.app-category.utilities
+  # arch in every name: an x64 dmg installed on Apple silicon runs under Rosetta and feels sluggish
+  artifactName: ${productName}-${version}-mac-${arch}.${ext}
   # Ad-hoc sign the whole bundle as com.suthiwat.zeta with Info.plist bound. Unsigned builds keep
   # the linker's "Electron" identity, so macOS never matches the Local Network permission to the
   # app and connections to the controller fail with EHOSTUNREACH even when the toggle is on.
@@ -24,6 +26,7 @@ win:
   target:
     - target: nsis
       arch: [x64]
+  artifactName: ${productName}-${version}-win-${arch}-setup.${ext}
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true

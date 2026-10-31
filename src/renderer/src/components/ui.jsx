@@ -174,16 +174,17 @@ export function ConfirmDialog({ open, title, message, confirmLabel = 'Confirm', 
   )
 }
 
-export function Field({ label, required, hint, children }) {
+/** as="div" for controls that aren't form inputs (e.g. Dropdown): a <label> would forward every click inside it to the button. */
+export function Field({ as: Tag = 'label', label, required, hint, children }) {
   return (
-    <label className="block">
+    <Tag className="block">
       <span className="text-[13px] font-medium text-muted">
         {label}
         {required && <span className="text-accent-2"> *</span>}
       </span>
       <div className="mt-1.5">{children}</div>
       {hint && <span className="mt-1.5 block text-xs leading-relaxed text-subtle">{hint}</span>}
-    </label>
+    </Tag>
   )
 }
 
