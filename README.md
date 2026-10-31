@@ -1,6 +1,10 @@
 # Zeta
 
-Desktop app (macOS + Windows) for bulk-provisioning Aruba access points from one Excel file.
+Desktop app (macOS + Windows) for bulk-provisioning Aruba access points from one Excel file. You preview the
+changes against the live controller, apply them as a job, and Zeta checks that each AP comes back with the new values.
+
+Download the latest installer from [Releases](https://github.com/pluemsuthiwat/zeta/releases/latest). Zeta tells
+you in the app when a newer version is published.
 
 ## Stack
 
@@ -40,19 +44,36 @@ node scripts/mock-controller.mjs --aps 60 --reboot 15
 ## Build installers
 
 ```bash
-npm run dist:mac     # on a Mac   -> dist/Zeta-<version>-arm64.dmg / x64.dmg
-npm run dist:win     # on Windows -> dist/Zeta Setup <version>.exe (NSIS installer)
+npm run dist:mac     # -> dist/Zeta-<version>-mac-arm64.dmg and dist/Zeta-<version>-mac-x64.dmg
+npm run dist:win     # -> dist/Zeta-<version>-win-x64-setup.exe (NSIS installer)
 ```
 
-On Windows: install Node 22.13+ (or 24) and run `npm install`, then `npm run dist:win`. There is no native module, so
-there are no Visual Studio build tools to install.
+There is no native module, so `dist:win` also runs on a Mac (the 1.1.x installers were made that way), or on Windows
+with Node 22.13+ and no Visual Studio build tools.
 
-Builds are unsigned: Windows SmartScreen warns on first run, and on macOS you right-click → Open the first time.
-Add code-signing certificates before distributing widely.
+The macOS app is ad-hoc signed as `com.suthiwat.zeta`. It needs that identity for the Local Network permission to
+apply. Without it, connections to the controller fail with EHOSTUNREACH. Nothing is signed with an Apple Developer
+ID or a Windows certificate, so on first run macOS needs right-click → Open, and Windows SmartScreen warns.
+
+Each build also writes `third-party-licenses.json` (every npm package that ships in the app, with its license text),
+which the About dialog lists.
 
 The logo source is `build/icon.svg`. After editing it, run `npx electron scripts/render-icons.cjs` to regenerate
 `build/icon.png` (electron-builder turns it into `.icns` / `.ico`), the macOS tray template images, and the header
 logo at `src/renderer/src/assets/logo.svg`.
+
+## Releasing
+
+1. Bump `version` in `package.json` (`npm version x.y.z --no-git-tag-version`), commit and push.
+2. Build both platforms (above).
+3. Publish a GitHub release tagged `vx.y.z` with the three installers, keeping the file names electron-builder gives
+   them.
+
+Zeta checks `releases/latest` on GitHub when it starts and every 6 hours, then shows a bar with **Download**. After
+the bar is closed, an **Update to x.y.z** button stays in the header. Drafts and pre-releases are never offered, so
+you can stage a release as a draft before publishing it. The **Download** button picks the asset whose name ends in
+`-mac-<arch>.dmg` or `-win-<arch>-setup.exe`, and otherwise opens the release page. To try the bar without
+publishing, point the app at a stub with `ZETA_UPDATE_API=http://127.0.0.1:<port>/latest`.
 
 ## Desktop behavior vs. the web version
 
@@ -63,16 +84,23 @@ logo at `src/renderer/src/assets/logo.svg`.
 - Apply re-reads the same file bytes and redoes the live preview in the main process. It never trusts the
   preview the window showed.
 
-## Not yet verified on real hardware
+## Tested on real controllers
 
-Everything has been tested against `scripts/mock-controller.mjs`, which mirrors what Zeta sends. Before you use
-Zeta on production APs, compare these two pieces in `src/main/lib/arubaClient.js` with the web version's
-`lib/arubaClient.js` (built from a HAR of ArubaOS 8.12):
+Verified with real AP reboots on standalone ArubaOS 8.x controllers (payload fields checked on AOS 8.13.3.1):
+rename, AP group, static IP / DNS, static ↔ DHCP, IP and name swaps and chains, moving an AP to another Master
+(ends as "Sent"; the AP shows up on the new controller after a few minutes), and several APs sent back to back.
 
-1. `buildProvisionPayload()`: the JSON for `clear_provisioning_ap_list`, `read_bootinfo`,
-   `copy_provisioning_params`, `ap_prov` and `ap_reprovision`.
-2. `parseProvisioning()`: how `show ap details ap-name <name>` is read. When it can't find the provisioning
-   section, every network value is treated as a change, which is safe but may reboot APs unnecessarily.
+Commands address APs by wired MAC, IP or serial, never by name: `read_bootinfo` by wired MAC,
+`copy_provisioning_params` by IP, `ap_reprovision` by serial, and `show ap details wired-mac` for the current
+values. AOS has no `show ap details serial-num`, and a name can belong to two APs in the middle of a swap.
+
+Not tested yet:
+
+- Managed by Mobility Master mode, and Config Node Path.
+- Controllers with thousands of APs (requests time out after 8 s), and jobs of hundreds of APs at once.
+- A Wi-Fi reconnect on the source interface in the middle of a job (covered by tests, not yet on the lab).
+- Windows: the installer, the title-bar overlay, source-interface binding and notifications have not been checked on
+  real Windows hardware.
 
 ## License
 
