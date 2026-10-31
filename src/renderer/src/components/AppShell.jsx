@@ -1,14 +1,17 @@
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Moon, Sun } from 'lucide-react'
+import { Info, Moon, Sun } from 'lucide-react'
 import logo from '../assets/logo.svg'
 import { useTheme } from '../theme.js'
 import { cx } from './ui.jsx'
 import SourceInterfacePicker from './SourceInterfacePicker.jsx'
+import AboutDialog from './AboutDialog.jsx'
 
 const isMac = window.zeta.platform === 'darwin'
 
 export default function AppShell({ children }) {
   const [theme, toggleTheme] = useTheme()
+  const [aboutOpen, setAboutOpen] = useState(false)
   return (
     <div className="flex h-full flex-col">
       {/* Doubles as the window title bar: drag anywhere, leave room for the window buttons. */}
@@ -35,8 +38,17 @@ export default function AppShell({ children }) {
         >
           {theme === 'dark' ? <Sun className="size-4" /> : <Moon className="size-4" />}
         </button>
+        <button
+          onClick={() => setAboutOpen(true)}
+          className="no-drag grid size-8 place-items-center rounded-lg text-subtle transition-colors hover:bg-hover hover:text-fg"
+          title="About Zeta"
+          aria-label="About Zeta"
+        >
+          <Info className="size-4" />
+        </button>
       </header>
       <main className="min-h-0 flex-1 overflow-auto">{children}</main>
+      <AboutDialog open={aboutOpen} onClose={() => setAboutOpen(false)} />
     </div>
   )
 }

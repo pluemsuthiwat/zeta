@@ -12,6 +12,9 @@ contextBridge.exposeInMainWorld('zeta', {
   window: {
     setTheme: (theme) => ipcRenderer.send('window:setTheme', theme)
   },
+  app: {
+    about: () => invoke('app:about')
+  },
   controllers: {
     list: () => invoke('controllers:list'),
     get: (id) => invoke('controllers:get', id),

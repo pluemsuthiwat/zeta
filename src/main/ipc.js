@@ -2,7 +2,7 @@
 // Passwords only ever travel renderer -> main on add/edit; nothing secret is sent back.
 import { ipcMain, dialog, BrowserWindow, app, powerSaveBlocker } from 'electron'
 import { writeFile } from 'node:fs/promises'
-import { appendFileSync, mkdirSync, readdirSync, statSync, unlinkSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { createArubaClient, createLock, forgetSession } from './lib/arubaClient.js'
@@ -370,5 +370,25 @@ export function registerIpc(store) {
     const job = store.getJob(jobId)
     if (!job) throw new Error('This job no longer exists.')
     return { job: jobSummary(job), items: store.getJobItems(jobId) }
+  })
+
+  // ---- about ----
+  // Written by scripts/third-party-licenses.mjs at build time, one file per bundle.
+  // `electron-vite dev` doesn't write them, so the list is empty there.
+  handle('app:about', () => {
+    const packages = new Map()
+    for (const target of ['main', 'preload', 'renderer']) {
+      try {
+        for (const p of JSON.parse(readFileSync(join(__dirname, '..', target, 'third-party-licenses.json'), 'utf8'))) {
+          packages.set(`${p.name}@${p.version}`, p)
+        }
+      } catch {
+        /* not built yet */
+      }
+    }
+    return {
+      versions: { electron: process.versions.electron, chrome: process.versions.chrome, node: process.versions.node },
+      packages: [...packages.values()].sort((a, b) => a.name.localeCompare(b.name))
+    }
   })
 }

@@ -73,3 +73,7 @@ Zeta on production APs, compare these two pieces in `src/main/lib/arubaClient.js
    `copy_provisioning_params`, `ap_prov` and `ap_reprovision`.
 2. `parseProvisioning()`: how `show ap details ap-name <name>` is read. When it can't find the provisioning
    section, every network value is treated as a change, which is safe but may reboot APs unnecessarily.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

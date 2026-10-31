@@ -5,6 +5,7 @@
   "description": "Bulk-provision Aruba access points from Excel",
   "main": "out/main/index.js",
   "author": "Suthiwat Srisen",
+  "license": "MIT",
   "private": true,
   "scripts": {
     "dev": "electron-vite dev",

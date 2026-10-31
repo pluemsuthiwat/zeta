@@ -1,5 +1,6 @@
 appId: com.suthiwat.zeta
 productName: Zeta
+copyright: Copyright © 2026 Suthiwat Srisen
 directories:
   output: dist
   buildResources: build
