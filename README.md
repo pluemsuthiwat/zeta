@@ -89,6 +89,7 @@ publishing, point the app at a stub with `ZETA_UPDATE_API=http://127.0.0.1:<port
 Verified with real AP reboots on standalone ArubaOS 8.x controllers (payload fields checked on AOS 8.13.3.1):
 rename, AP group, static IP / DNS, static ↔ DHCP, IP and name swaps and chains, moving an AP to another Master
 (ends as "Sent"; the AP shows up on the new controller after a few minutes), and several APs sent back to back.
+The same tests pass on both macOS and Windows.
 
 Commands address APs by wired MAC, IP or serial, never by name: `read_bootinfo` by wired MAC,
 `copy_provisioning_params` by IP, `ap_reprovision` by serial, and `show ap details wired-mac` for the current
@@ -99,8 +100,6 @@ Not tested yet:
 - Managed by Mobility Master mode, and Config Node Path.
 - Controllers with thousands of APs (requests time out after 8 s), and jobs of hundreds of APs at once.
 - A Wi-Fi reconnect on the source interface in the middle of a job (covered by tests, not yet on the lab).
-- Windows: the installer, the title-bar overlay, source-interface binding and notifications have not been checked on
-  real Windows hardware.
 
 ## License
 
