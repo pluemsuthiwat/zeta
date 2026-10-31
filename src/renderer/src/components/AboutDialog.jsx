@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { ChevronRight, ExternalLink } from 'lucide-react'
+import { ChevronRight, ExternalLink, RefreshCw } from 'lucide-react'
 import { api } from '../api.js'
 import logo from '../assets/logo.svg'
 import zetaLicense from '../../../../LICENSE?raw'
@@ -22,6 +22,16 @@ export default function AboutDialog({ open, onClose }) {
   const [query, setQuery] = useState('')
   const [expanded, setExpanded] = useState(null) // 'zeta' or name@version
   const toggle = (key) => setExpanded((k) => (k === key ? null : key))
+  const [update, setUpdate] = useState({ state: 'idle' }) // idle | checking | done | error
+
+  async function checkUpdate() {
+    setUpdate({ state: 'checking' })
+    try {
+      setUpdate({ state: 'done', ...(await api.app.checkUpdate(true)) })
+    } catch (err) {
+      setUpdate({ state: 'error', error: err.message })
+    }
+  }
 
   useEffect(() => {
     if (!open || about) return
@@ -61,6 +71,26 @@ export default function AboutDialog({ open, onClose }) {
           Electron {about.versions.electron} · Chromium {about.versions.chrome} · Node {about.versions.node}
         </p>
       )}
+
+      <div className="mt-3 flex flex-wrap items-center gap-3">
+        <Button size="sm" icon={RefreshCw} busy={update.state === 'checking'} onClick={checkUpdate}>
+          Check for updates
+        </Button>
+        {update.state === 'done' && !update.available && <span className="text-[13px] text-ok">Zeta is up to date.</span>}
+        {update.state === 'done' && update.available && (
+          <span className="text-[13px] text-fg">
+            Zeta {update.latest} is available.{' '}
+            <a href={update.downloadUrl || update.releaseUrl} target="_blank" rel="noreferrer" className="font-medium text-accent hover:underline">
+              Download
+            </a>
+            {' · '}
+            <a href={update.releaseUrl} target="_blank" rel="noreferrer" className="text-accent hover:underline">
+              What's new
+            </a>
+          </span>
+        )}
+        {update.state === 'error' && <span className="text-[13px] text-bad">Couldn't check: {update.error}</span>}
+      </div>
 
       <div className="mt-4">
         <button onClick={() => toggle('zeta')} className="flex items-center gap-1.5 text-[13px] font-medium text-muted hover:text-fg">

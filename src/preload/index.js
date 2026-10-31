@@ -13,7 +13,9 @@ contextBridge.exposeInMainWorld('zeta', {
     setTheme: (theme) => ipcRenderer.send('window:setTheme', theme)
   },
   app: {
-    about: () => invoke('app:about')
+    about: () => invoke('app:about'),
+    /** force: skip the main process's one-hour cache (the About dialog's button). */
+    checkUpdate: (force) => invoke('app:checkUpdate', force)
   },
   controllers: {
     list: () => invoke('controllers:list'),

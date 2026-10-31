@@ -6,6 +6,7 @@ import { useTheme } from '../theme.js'
 import { cx } from './ui.jsx'
 import SourceInterfacePicker from './SourceInterfacePicker.jsx'
 import AboutDialog from './AboutDialog.jsx'
+import UpdateBanner from './UpdateBanner.jsx'
 
 const isMac = window.zeta.platform === 'darwin'
 
@@ -47,6 +48,7 @@ export default function AppShell({ children }) {
           <Info className="size-4" />
         </button>
       </header>
+      <UpdateBanner />
       <main className="min-h-0 flex-1 overflow-auto">{children}</main>
       <AboutDialog open={aboutOpen} onClose={() => setAboutOpen(false)} />
     </div>

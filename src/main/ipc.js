@@ -1,6 +1,6 @@
 // IPC surface between the window and the main process (replaces the web app's /api routes).
 // Passwords only ever travel renderer -> main on add/edit; nothing secret is sent back.
-import { ipcMain, dialog, BrowserWindow, app, powerSaveBlocker } from 'electron'
+import { ipcMain, dialog, BrowserWindow, app, net, powerSaveBlocker } from 'electron'
 import { writeFile } from 'node:fs/promises'
 import { appendFileSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
@@ -15,6 +15,7 @@ import { isIpv4 } from './lib/ipv4.js'
 import { encryptPassword, decryptPassword } from './secrets.js'
 import { checkRateLimit } from './rateLimit.js'
 import { currentAddress, listInterfaces, resolveSource, watchInterfaces } from './netInterfaces.js'
+import { checkForUpdate, RELEASES_API } from './lib/updateCheck.js'
 
 const TERMINAL = ['ok', 'sent', 'failed', 'skipped']
 export const runningJobs = new Set()
@@ -390,5 +391,23 @@ export function registerIpc(store) {
       versions: { electron: process.versions.electron, chrome: process.versions.chrome, node: process.versions.node },
       packages: [...packages.values()].sort((a, b) => a.name.localeCompare(b.name))
     }
+  })
+
+  // ---- updates ----
+  // Goes out the default route (not the source interface: that one is for controllers).
+  // One answer is reused for an hour so the window's periodic checks stay far below GitHub's limit.
+  const UPDATE_TTL_MS = 60 * 60 * 1000
+  let lastUpdate = null
+  handle('app:checkUpdate', async (force) => {
+    if (!force && lastUpdate && Date.now() - lastUpdate.at < UPDATE_TTL_MS) return lastUpdate.result
+    const result = await checkForUpdate({
+      current: app.getVersion(),
+      platform: process.platform,
+      arch: process.arch,
+      fetch: net.fetch,
+      url: process.env.ZETA_UPDATE_API || RELEASES_API // tests point it at a local stub
+    })
+    lastUpdate = { at: Date.now(), result: { ...result, checkedAt: Date.now() } }
+    return lastUpdate.result
   })
 }
