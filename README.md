@@ -51,9 +51,23 @@ npm run dist:win     # -> dist/Zeta-<version>-win-x64-setup.exe (NSIS installer)
 There is no native module, so `dist:win` also runs on a Mac (the 1.1.x installers were made that way), or on Windows
 with Node 22.13+ and no Visual Studio build tools.
 
-The macOS app is ad-hoc signed as `com.suthiwat.zeta`. It needs that identity for the Local Network permission to
-apply. Without it, connections to the controller fail with EHOSTUNREACH. Nothing is signed with an Apple Developer
-ID or a Windows certificate, so on first run macOS needs right-click → Open, and Windows SmartScreen warns.
+The macOS app is signed with the Developer ID "Suthiwat Srisen (FHJV635JGF)" and notarized, so it opens without a
+Gatekeeper warning. A signed identity (`com.suthiwat.zeta`) is also what makes the Local Network permission apply;
+without it, connections to the controller fail with EHOSTUNREACH. The build fails on a Mac without that certificate.
+
+Notarizing needs a notarytool profile named `zeta` in the keychain (once per Mac, with an app-specific password from
+account.apple.com):
+
+```bash
+xcrun notarytool store-credentials zeta --apple-id <apple id> --team-id FHJV635JGF
+APPLE_KEYCHAIN_PROFILE=zeta npm run dist:mac
+```
+
+Without `APPLE_KEYCHAIN_PROFILE`, electron-builder only warns "skipped macOS notarization" and the dmg still builds.
+Check before publishing: `spctl -a -vv /Volumes/Zeta*/Zeta.app` must say `source=Notarized Developer ID`. Don't set
+`APPLE_KEYCHAIN` to the login keychain: notarytool keeps the profile elsewhere and then can't find it.
+
+The Windows installer is not signed, so Windows SmartScreen warns on first run.
 
 Each build also writes `third-party-licenses.json` (every npm package that ships in the app, with its license text),
 which the About dialog lists.
@@ -65,7 +79,7 @@ logo at `src/renderer/src/assets/logo.svg`.
 ## Releasing
 
 1. Bump `version` in `package.json` (`npm version x.y.z --no-git-tag-version`), commit and push.
-2. Build both platforms (above).
+2. Build both platforms (above), macOS with `APPLE_KEYCHAIN_PROFILE=zeta`.
 3. Publish a GitHub release tagged `vx.y.z` with the three installers, keeping the file names electron-builder gives
    them.
 

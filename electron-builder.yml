@@ -15,11 +15,13 @@ mac:
   category: public.app-category.utilities
   # arch in every name: an x64 dmg installed on Apple silicon runs under Rosetta and feels sluggish
   artifactName: ${productName}-${version}-mac-${arch}.${ext}
-  # Ad-hoc sign the whole bundle as com.suthiwat.zeta with Info.plist bound. Unsigned builds keep
-  # the linker's "Electron" identity, so macOS never matches the Local Network permission to the
-  # app and connections to the controller fail with EHOSTUNREACH even when the toggle is on.
-  identity: '-'
-  hardenedRuntime: false # with an ad-hoc signature, library validation would refuse Electron's frameworks
+  # Sign with the Developer ID so Gatekeeper opens the app without warnings. Named explicitly: on a
+  # machine without this certificate the build fails instead of shipping an unsigned app, which
+  # macOS never matches to the Local Network permission (EHOSTUNREACH to the controller).
+  identity: Suthiwat Srisen (FHJV635JGF)
+  hardenedRuntime: true # required for notarization; Electron's entitlements come from electron-builder's default
+  # Needs APPLE_KEYCHAIN + APPLE_KEYCHAIN_PROFILE (see README, Releasing)
+  notarize: true
   extendInfo:
     NSLocalNetworkUsageDescription: Zeta connects to Aruba controllers on your local network to provision access points.
 win:
