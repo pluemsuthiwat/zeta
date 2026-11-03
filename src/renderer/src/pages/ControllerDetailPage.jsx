@@ -19,6 +19,7 @@ import { formatDateTime, formatMac, modeLabel } from '../format.js'
 import ImportPreviewModal from '../components/ImportPreviewModal.jsx'
 import BackNav from '../components/BackNav.jsx'
 import Dropdown from '../components/Dropdown.jsx'
+import { filterAps, statusBucket } from '../apFilter.js'
 import {
   Badge,
   Button,
@@ -40,6 +41,15 @@ import {
 } from '../components/ui.jsx'
 
 const PAGE_SIZE = 100
+const EXACT_KEY = 'zeta-search-exact'
+
+function readExact() {
+  try {
+    return localStorage.getItem(EXACT_KEY) === '1'
+  } catch {
+    return false
+  }
+}
 
 export default function ControllerDetailPage() {
   const { controllerId } = useParams()
@@ -51,7 +61,9 @@ export default function ControllerDetailPage() {
   const [updatedAt, setUpdatedAt] = useState(null) // last successful read, for the "Updated …" pulse
   const [jobs, setJobs] = useState([])
   const [group, setGroup] = useState('')
+  const [status, setStatus] = useState('')
   const [query, setQuery] = useState('')
+  const [exact, setExact] = useState(readExact)
   const [page, setPage] = useState(1)
   const [importOpen, setImportOpen] = useState(false)
   const [flagsHelpOpen, setFlagsHelpOpen] = useState(false)
@@ -114,21 +126,23 @@ export default function ControllerDetailPage() {
   const summary = data?.summary
   const groups = useMemo(() => Object.entries(summary?.groups || {}).sort(([a], [b]) => a.localeCompare(b)), [summary])
 
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    const qMac = q.replace(/[^0-9a-f]/g, '')
-    return aps.filter((a) => {
-      if (group && (a.group || '(none)') !== group) return false
-      if (!q) return true
-      return (
-        a.name.toLowerCase().includes(q) ||
-        a.serial.toLowerCase().includes(q) ||
-        a.ip.includes(q) ||
-        (qMac.length >= 2 && a.mac.includes(qMac))
-      )
+  const statusCounts = useMemo(() => {
+    const c = { up: 0, down: 0, other: 0 }
+    for (const a of aps) c[statusBucket(a)]++
+    return c
+  }, [aps])
+  const filtered = useMemo(() => filterAps(aps, { group, status, query, exact }), [aps, group, status, query, exact])
+  useEffect(() => setPage(1), [group, status, query, exact])
+  const toggleExact = () => {
+    setExact((v) => {
+      try {
+        localStorage.setItem(EXACT_KEY, v ? '0' : '1')
+      } catch {
+        /* remembering is a convenience */
+      }
+      return !v
     })
-  }, [aps, group, query])
-  useEffect(() => setPage(1), [group, query])
+  }
   const pages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
   const shown = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
 
@@ -223,24 +237,54 @@ export default function ControllerDetailPage() {
         {/* table */}
         <Card className="relative mt-6 overflow-hidden">
           <TopProgress active={refreshing && Boolean(data)} />
-          <div className="flex items-center justify-between gap-3 px-5 py-4">
+          <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
             <div>
               <h2 className="font-semibold text-fg">Access Points</h2>
-              <p className="mt-0.5 flex items-center gap-1.5 text-xs text-subtle">
+              <p className="mt-0.5 flex items-center gap-1.5 whitespace-nowrap text-xs text-subtle">
                 Live from the controller · refreshes every 5 seconds
                 <UpdatedAt at={updatedAt} />
               </p>
             </div>
             <div className="flex items-center gap-2">
               <Dropdown
-                className="w-56"
+                className="w-52"
                 ariaLabel="Filter by AP group"
                 prefix="Group"
                 value={group}
                 onChange={setGroup}
                 options={[{ value: '', label: 'All groups', count: aps.length }, ...groups.map(([g, n]) => ({ value: g, label: g, count: n }))]}
               />
-              <SearchInput value={query} onChange={setQuery} placeholder="Search serial, MAC, name or IP" className="w-80" />
+              <Dropdown
+                className="w-40"
+                ariaLabel="Filter by AP status"
+                prefix="Status"
+                value={status}
+                onChange={setStatus}
+                options={[
+                  { value: '', label: 'All', count: aps.length },
+                  { value: 'up', label: 'Up', count: statusCounts.up },
+                  { value: 'down', label: 'Down', count: statusCounts.down },
+                  ...(statusCounts.other || status === 'other' ? [{ value: 'other', label: 'Other', count: statusCounts.other }] : [])
+                ]}
+              />
+              <SearchInput
+                value={query}
+                onChange={setQuery}
+                placeholder={exact ? 'Exact serial, MAC, name, IP' : 'Serial, MAC, name or IP'}
+                className="w-64"
+              />
+              <button
+                type="button"
+                onClick={toggleExact}
+                aria-pressed={exact}
+                title={exact ? 'Exact match: the whole serial, MAC, name or IP must match' : 'Contains: matches part of a serial, MAC, name or IP'}
+                className={cx(
+                  'h-9 shrink-0 rounded-lg border px-3 text-sm font-medium transition-colors focus:outline-none focus-visible:ring-3 focus-visible:ring-accent/20',
+                  exact ? 'border-accent/70 bg-accent/15 text-accent' : 'border-line-strong bg-elev2 text-subtle hover:border-subtle/50 hover:text-fg'
+                )}
+              >
+                Exact
+              </button>
             </div>
           </div>
 
